@@ -19,6 +19,23 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   }
 });
 
+// Config provider — the offscreen node can't read chrome.storage, so it asks here.
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "getCfg") return;
+  chrome.storage.local.get("cfg").then(async ({ cfg }) => {
+    if (!cfg || !cfg.bus) {
+      try { cfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) {}
+    }
+    sendResponse(cfg && cfg.bus ? cfg : null);
+  });
+  return true; // async
+});
+
+// State sink — the offscreen node can't write chrome.storage, so it routes here (for the popup).
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === "state" && msg.patch) chrome.storage.local.set(msg.patch);
+});
+
 // [DOM] hands — read the active tab's DOM on request from the offscreen node.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "dom") return;
