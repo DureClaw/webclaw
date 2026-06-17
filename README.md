@@ -36,6 +36,8 @@ DureClaw bus ──task.assign──▶ webclaw (offscreen WS) ──▶ result
 3. Click the **webclaw** toolbar icon → fill in **Bus**, **Token**, **Work Key**,
    **Brain URL/token** → **Connect to fleet**
 
+> Tip: copy `config.local.json.example` → `config.local.json` (gitignored) to **auto-connect on load** — no popup typing.
+
 The node appears in the fleet's presence; a master can fan-out tasks to it, and the
 popup shows a live task feed.
 

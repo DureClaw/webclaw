@@ -1,0 +1,10 @@
+{
+  "bus": "100.108.196.12:4000",
+  "secret": "YOUR_OAH_SECRET",
+  "workKey": "WK-xxxxxxxx",
+  "name": "webclaw@my-browser",
+  "role": "executor",
+  "caps": ["browser", "fetch", "dom", "agent", "webclaw"],
+  "brainUrl": "http://100.108.196.12:4111",
+  "brainToken": "YOUR_BRAIN_TOKEN"
+}
