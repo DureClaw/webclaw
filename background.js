@@ -1,12 +1,13 @@
 async function ensureOffscreen() {
   const has = await chrome.offscreen.hasDocument();
   if (has) return;
-  await chrome.offscreen.createDocument({
+    await chrome.offscreen.createDocument({
     url: "offscreen.html",
-    reasons: ["WORKERS"],
+    reasons: ["BLOBS"],
     justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
   });
 }
+ensureOffscreen();  // run on SW load
 chrome.runtime.onInstalled.addListener(ensureOffscreen);
 chrome.runtime.onStartup.addListener(ensureOffscreen);
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {

@@ -1,8 +1,12 @@
 // Holds the persistent bus WebSocket (MV3 service workers idle out; offscreen does not).
 let inst = null;
 async function start() {
-  const { cfg } = await chrome.storage.local.get("cfg");
-  if (!cfg || !cfg.bus) return;
+  let { cfg } = await chrome.storage.local.get("cfg");
+  if (!cfg || !cfg.bus) {
+    // first-run convenience: a local (gitignored) default config auto-connects.
+    try { cfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) {}
+  }
+    if (!cfg || !cfg.bus) return;
   if (inst) inst.disconnect();
   const feed = [];
   inst = createWebclaw(cfg, {
