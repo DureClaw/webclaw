@@ -73,5 +73,6 @@ can call* (fetch, DOM, screenshot), not the thing being automated for one user.
 ---
 
 _Family: [edgeclaw](https://github.com/DureClaw/edgeclaw) (OS node, Go) ·
-**webclaw** (browser node) · adapters: picoclaw · nanobot · zeroclaw · nullclaw.
+**webclaw** (browser node) · [deskclaw](https://github.com/DureClaw/deskclaw) (desktop GUI node) ·
+adapters: picoclaw · nanobot · zeroclaw · nullclaw.
 Data at the edge · brains distributed · learning in a closed loop · humans decide._
