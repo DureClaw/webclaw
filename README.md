@@ -47,10 +47,26 @@ OAH_SECRET=<token> node test/node-test.cjs
 
 Verified end-to-end: LLM via master-brain delegation **and** `[FETCH]` browser hands.
 
+## Comparison — webclaw is a *node*, not an *assistant*
+
+| | what it is | LLM key | webclaw difference |
+|---|---|---|---|
+| **[Nanobrowser](https://github.com/nanobrowser/nanobrowser)** | open-source MV3 web-automation agent | **in the extension** (yours) | webclaw is **keyless** — the master brings the brain |
+| **[browser-use](https://github.com/browser-use/browser-use) / Open Operator** | LLM *drives* the browser via DOM | in the agent | webclaw lends the browser to a fleet; it isn't driven |
+| **OpenAI Operator · Codex ext · Do Browser** | single-user browser assistants | in/with the product | webclaw is a **fleet node**, one of many heterogeneous workers |
+| **Browserless · Cloudflare · Bedrock AgentCore** | *cloud* browser pools driven by agents | n/a | webclaw is **your real browser** as an edge node, no cloud pool |
+
+> "Nanobrowser **drives** the browser; webclaw **lends** the browser to a fleet."
+
+What's unique is the combination: **distributed fleet node + keyless (master-delegated LLM)
++ always-on extension + CORS-free browser hands.** The browser is a *capability the fleet
+can call* (fetch, DOM, screenshot), not the thing being automated for one user.
+
 ## Roadmap
 
-- `[DOM] <query>` / `[SCREENSHOT]` — content-script hands across any tab
+- `[SCREENSHOT]` — capture the active tab for the fleet
 - LLM-over-bus option (no HTTP at all) · popup status polish · Firefox/Edge
+- (done) `[DOM] <css-selector>` — read the active tab's DOM via a fleet task
 
 ---
 

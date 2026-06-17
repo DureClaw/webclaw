@@ -8,6 +8,8 @@ async function start() {
   inst = createWebclaw(cfg, {
     onLog: (m) => chrome.storage.local.set({ log: m }),
     onStatus: (s) => chrome.storage.local.set({ status: s }),
+    dom: (query) => new Promise((resolve) =>
+      chrome.runtime.sendMessage({ type: "dom", query }, (r) => resolve((r && r.text) || "(no dom)"))),
     onTask: (t) => {
       feed.unshift({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() });
       feed.splice(40);
