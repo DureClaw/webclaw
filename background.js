@@ -106,6 +106,20 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   return true; // async
 });
 
+// [DOWNLOAD] <url> — trigger a real browser download (session cookies included,
+// saved to disk) — unlike page fetch() which only returns bytes to JS. Ideal for
+// bulk file/zip downloads (e.g. Moodle action=downloadall).
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "download") return;
+  try {
+    chrome.downloads.download({ url: msg.url }, (id) => {
+      if (chrome.runtime.lastError) sendResponse({ text: "download error: " + chrome.runtime.lastError.message });
+      else sendResponse({ text: "download started (id=" + id + "): " + msg.url });
+    });
+  } catch (e) { sendResponse({ text: "download error: " + e }); }
+  return true; // async
+});
+
 // [CLICK]/[FILL]/[TYPE]/[SUBMIT]/[JS] — act on the target tab (real interaction).
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "act") return;
