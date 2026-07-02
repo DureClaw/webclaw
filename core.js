@@ -3,7 +3,7 @@
 // global WebSocket + fetch. No build step. The master brings the brain; this
 // node brings browser hands (fetch / DOM) + delegates LLM to the master.
 (function (root) {
-  var CAP = 200000; // generous output cap (raised from 1500)
+  var CAP = 2000000; // 채점 페이지 등 대형 HTML 위해 상향 (2MB)
 
   function createWebclaw(cfg, hooks) {
     hooks = hooks || {};
@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.3",
+          preferred_model: "browser", version: "webclaw/0.3.1",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);

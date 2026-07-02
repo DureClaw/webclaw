@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "webclaw — DureClaw browser node",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Join a DureClaw fleet from your browser. The master brings the brain; this node brings browser hands — fetch, DOM read, and now click/fill/submit/JS on a targeted tab. CORS-free, always-on.",
   "permissions": [
     "offscreen",

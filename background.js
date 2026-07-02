@@ -1,7 +1,7 @@
 // webclaw background service worker — owns chrome.storage/tabs/scripting and the
 // offscreen document that holds the persistent bus WebSocket.
 
-const CAP = 200000; // generous output cap (raised from 1500) — a single large
+const CAP = 2000000; // raised for large grading pages (2MB)
                     // task.result frame is fine (screenshots already send ~262KB).
 
 async function ensureOffscreen() {
