@@ -17,8 +17,12 @@ async function start() {
   inst = createWebclaw(cfg, {
     onLog: (m) => save({ log: m }),
     onStatus: (s) => save({ status: s }),
-    dom: (query) => new Promise((resolve) =>
-      chrome.runtime.sendMessage({ type: "dom", query }, (r) => resolve((r && r.text) || "(no dom)"))),
+    dom: (query, urlMatch) => new Promise((resolve) =>
+      chrome.runtime.sendMessage({ type: "dom", query, urlMatch }, (r) => resolve((r && r.text) || "(no dom)"))),
+    tabs: () => new Promise((resolve) =>
+      chrome.runtime.sendMessage({ type: "tabs" }, (r) => resolve((r && r.text) || "(no tabs)"))),
+    act: (payload) => new Promise((resolve) =>
+      chrome.runtime.sendMessage(Object.assign({ type: "act" }, payload), (r) => resolve((r && r.text) || "(no result)"))),
     onTask: (t) => {
       feed.unshift({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() });
       feed.splice(40);

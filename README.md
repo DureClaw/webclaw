@@ -19,14 +19,24 @@ The same `core.js` runs in the extension *and* in Node (see `test/`).
 ## How it works
 
 ```
-DureClaw bus ──task.assign──▶ webclaw (offscreen WS) ──▶ result
-   • [FETCH] <url>   → extension fetch (CORS-free)
-   • default (LLM)   → delegate to the master brain (keyless to the page)  ──▶ task.result
+DureClaw bus ──task.assign──▶ webclaw (offscreen WS) ──▶ task.result
+   • [FETCH] <url>            → extension fetch (CORS-free)
+   • [DOM] <css>              → read a tab's DOM / page text
+   • [CLICK] <css>            → click an element
+   • [FILL] <css> = <value>   → set an input's value (+ input/change events)
+   • [SUBMIT] <css>           → submit a form
+   • [JS] <code>              → run JS in the page, return the result
+   • [TABS]                   → list open tabs (to find the logged-in one)
+   • default (LLM)            → delegate to the master brain (keyless to the page)
 ```
 
 - Joins the bus, presence + heartbeat (offscreen document → survives MV3 idle).
+- **Read _and act_**: `[DOM]`/`[JS]` read; `[CLICK]`/`[FILL]`/`[SUBMIT]` interact — real form input, not just scraping.
+- **Target a specific tab** with `[<MARKER>@<url-substring>] …` — e.g. `[DOM@lms.example.com] table.grades` picks the tab whose URL contains `lms.example.com` (the logged-in session) instead of the active one.
+- **Distinct nodes per profile**: each Chrome profile registers as `webclaw@chrome-<id>`, so two profiles don't collide on one name and both answer the same task. Use `[TABS]` to see which node holds the logged-in session.
+- Output cap raised to ~200 KB (was 1.5 KB) — full tables/pages come back.
 - `[FETCH] <url>` runs an extension fetch (no page-CORS limits).
-- Anything else → POSTs to the **master brain** (`Brain URL`) so the heavy thinking
+- Anything without a marker → POSTs to the **master brain** (`Brain URL`) so the heavy thinking
   stays on the master — the browser holds no model and no API cost.
 
 ## Install (load unpacked)
@@ -66,9 +76,10 @@ can call* (fetch, DOM, screenshot), not the thing being automated for one user.
 
 ## Roadmap
 
-- `[SCREENSHOT]` — capture the active tab for the fleet
+- `[SCREENSHOT]` — capture the target tab for the fleet
+- `[WAIT] <css>` — wait for a selector before reading/acting (SPA readiness)
 - LLM-over-bus option (no HTTP at all) · popup status polish · Firefox/Edge
-- (done) `[DOM] <css-selector>` — read the active tab's DOM via a fleet task
+- (done) `[DOM] <css>` read · `[CLICK]`/`[FILL]`/`[SUBMIT]`/`[JS]` act · `[TABS]` list · `@<url>` tab targeting · per-profile node ids · 200 KB output cap
 
 ---
 

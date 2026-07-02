@@ -3,6 +3,8 @@
 // global WebSocket + fetch. No build step. The master brings the brain; this
 // node brings browser hands (fetch / DOM) + delegates LLM to the master.
 (function (root) {
+  var CAP = 200000; // generous output cap (raised from 1500)
+
   function createWebclaw(cfg, hooks) {
     hooks = hooks || {};
     const log = (m) => hooks.onLog && hooks.onLog(m);
@@ -20,8 +22,8 @@
         joinRef = nref();
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
-          capabilities: cfg.caps || ["browser", "fetch", "agent"],
-          preferred_model: "browser", version: "webclaw/0.1",
+          capabilities: cfg.caps || ["browser", "fetch", "dom", "click", "form", "js", "tabs", "agent"],
+          preferred_model: "browser", version: "webclaw/0.2",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -53,7 +55,7 @@
       try { out = await runTask(instr, cfg, hooks); } catch (e) { out = String(e); code = 1; }
       send([joinRef, nref(), "work:" + cfg.workKey, "task.result", {
         task_id: p.task_id, to: from, from: cfg.name,
-        status: code ? "blocked" : "done", output: String(out).slice(0, 1800),
+        status: code ? "failed" : "done", output: String(out).slice(0, CAP),
         exit_code: code, backend: "webclaw",
       }]);
       hooks.onTask && hooks.onTask({ dir: "out", name: cfg.name, text: String(out).slice(0, 120) });
@@ -63,17 +65,50 @@
     return { disconnect() { closed = true; try { clearInterval(hb); ws && ws.close(); } catch (e) {} } };
   }
 
+  // Parse a leading marker: [NAME] or [NAME@<url-substring>] then the rest.
+  // The optional @<url-substring> picks a specific tab (e.g. the logged-in
+  // session) instead of the active one.
+  function parseMarker(t) {
+    const m = t.match(/^\[([A-Za-z]+)(?:@([^\]]+))?\]\s*([\s\S]*)$/);
+    return m ? { name: m[1].toUpperCase(), urlMatch: (m[2] || "").trim(), rest: m[3] } : null;
+  }
+
+  // Split "<selector> = <value>" or "<selector>\n<value>" (newline first so
+  // attribute selectors like input[name="x"] don't get split on their own '=').
+  function splitSelVal(rest) {
+    const nl = rest.indexOf("\n");
+    if (nl >= 0) return { selector: rest.slice(0, nl).trim(), value: rest.slice(nl + 1) };
+    const eq = rest.indexOf(" = ");
+    if (eq >= 0) return { selector: rest.slice(0, eq).trim(), value: rest.slice(eq + 3) };
+    return { selector: rest.trim(), value: "" };
+  }
+
   // Task execution — browser hands + LLM delegation to the master (keyless to the page).
   async function runTask(instr, cfg, hooks) {
-    const t = instr.trim(), up = t.toUpperCase();
-    // [FETCH] <url> — extension fetch bypasses page CORS (host_permissions).
-    if (up.startsWith("[FETCH]")) {
-      const r = await fetch(t.slice(7).trim());
-      return (await r.text()).slice(0, 1500);
-    }
-    // [DOM] <query> — read the active tab's DOM (provided by the extension).
-    if (up.startsWith("[DOM]") && hooks.dom) {
-      return await hooks.dom(t.slice(5).trim());
+    const t = instr.trim();
+    const mk = parseMarker(t);
+    if (mk) {
+      const { name, urlMatch, rest } = mk;
+      // [FETCH] <url> — extension fetch bypasses page CORS (host_permissions).
+      if (name === "FETCH") {
+        const r = await fetch(rest.trim());
+        return (await r.text()).slice(0, CAP);
+      }
+      // [DOM] <query> — read the target tab's DOM (empty query = page text).
+      if (name === "DOM" && hooks.dom) return await hooks.dom(rest.trim(), urlMatch);
+      // [TABS] — list open tabs so the master can target the logged-in session.
+      if (name === "TABS" && hooks.tabs) return await hooks.tabs();
+      // [CLICK] <selector>
+      if (name === "CLICK" && hooks.act) return await hooks.act({ action: "click", selector: rest.trim(), urlMatch });
+      // [FILL]/[TYPE] <selector> = <value>   (or selector\nvalue)
+      if ((name === "FILL" || name === "TYPE") && hooks.act) {
+        const { selector, value } = splitSelVal(rest);
+        return await hooks.act({ action: "fill", selector, value, urlMatch });
+      }
+      // [SUBMIT] <selector> — submit a form (or the element's form / click).
+      if (name === "SUBMIT" && hooks.act) return await hooks.act({ action: "submit", selector: rest.trim(), urlMatch });
+      // [JS] <code> — run JS in the target page, return the result (grading etc.).
+      if (name === "JS" && hooks.act) return await hooks.act({ action: "js", code: rest, urlMatch });
     }
     // default → delegate LLM to the master brain (the master does the thinking).
     if (cfg.brainUrl) {

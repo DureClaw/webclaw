@@ -1,15 +1,22 @@
+// webclaw background service worker — owns chrome.storage/tabs/scripting and the
+// offscreen document that holds the persistent bus WebSocket.
+
+const CAP = 200000; // generous output cap (raised from 1500) — a single large
+                    // task.result frame is fine (screenshots already send ~262KB).
+
 async function ensureOffscreen() {
   const has = await chrome.offscreen.hasDocument();
   if (has) return;
-    await chrome.offscreen.createDocument({
+  await chrome.offscreen.createDocument({
     url: "offscreen.html",
     reasons: ["BLOBS"],
     justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
   });
 }
-ensureOffscreen();  // run on SW load
+ensureOffscreen(); // run on SW load
 chrome.runtime.onInstalled.addListener(ensureOffscreen);
 chrome.runtime.onStartup.addListener(ensureOffscreen);
+
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (msg && msg.type === "connect") {
     ensureOffscreen()
@@ -19,12 +26,28 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   }
 });
 
+// Stable per-install id so two Chrome profiles running webclaw show up as
+// distinct nodes (webclaw@chrome-ab12) instead of colliding on one name and
+// both answering the same task.
+async function instanceId() {
+  let { instanceId } = await chrome.storage.local.get("instanceId");
+  if (!instanceId) {
+    instanceId = Math.random().toString(36).slice(2, 6);
+    await chrome.storage.local.set({ instanceId });
+  }
+  return instanceId;
+}
+
 // Config provider — the offscreen node can't read chrome.storage, so it asks here.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "getCfg") return;
   chrome.storage.local.get("cfg").then(async ({ cfg }) => {
     if (!cfg || !cfg.bus) {
       try { cfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) {}
+    }
+    if (cfg && cfg.bus) {
+      const id = await instanceId();
+      if (cfg.name && !cfg.name.endsWith("-" + id)) cfg.name = cfg.name + "-" + id;
     }
     sendResponse(cfg && cfg.bus ? cfg : null);
   });
@@ -36,24 +59,100 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "state" && msg.patch) chrome.storage.local.set(msg.patch);
 });
 
-// [DOM] hands — read the active tab's DOM on request from the offscreen node.
+// Pick the target tab: a URL-substring match (to hit a specific logged-in
+// session across many tabs), else the active tab of the last focused window.
+async function pickTab(urlMatch) {
+  if (urlMatch) {
+    const tabs = await chrome.tabs.query({});
+    const hit = tabs.find((t) => (t.url || "").includes(urlMatch));
+    if (hit) return hit;
+  }
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return active || null;
+}
+
+// [TABS] — list open tabs so the master can see which one holds the logged-in
+// session and target it with @<url-substring>.
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "tabs") return;
+  chrome.tabs.query({}).then((tabs) => {
+    const list = tabs
+      .map((t) => `${t.active ? "*" : " "} [${t.windowId}] ${t.title || ""} — ${t.url || ""}`)
+      .join("\n");
+    sendResponse({ text: list.slice(0, CAP) || "(no tabs)" });
+  });
+  return true; // async
+});
+
+// [DOM] hands — read the target tab's DOM (raised cap).
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "dom") return;
-  chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
-    if (!tab) { sendResponse({ text: "(no active tab)" }); return; }
+  pickTab(msg.urlMatch).then((tab) => {
+    if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: (q) => {
+      func: (q, cap) => {
         try {
-          if (!q) return (document.title + " | " + location.href + "\n" + document.body.innerText).slice(0, 1500);
+          if (!q) return (document.title + " | " + location.href + "\n" + document.body.innerText).slice(0, cap);
           const els = [...document.querySelectorAll(q)];
           if (!els.length) return "(no match for: " + q + ")";
-          return els.map((e) => (e.innerText || e.textContent || "").trim()).join("\n").slice(0, 1500);
+          return els.map((e) => (e.innerText || e.textContent || "").trim()).join("\n").slice(0, cap);
         } catch (e) { return "DOM error: " + e; }
       },
-      args: [msg.query || ""],
+      args: [msg.query || "", CAP],
     }).then((res) => sendResponse({ text: res && res[0] ? res[0].result : "(no result)" }))
       .catch((e) => sendResponse({ text: "scripting error: " + e }));
+  });
+  return true; // async
+});
+
+// [CLICK]/[FILL]/[TYPE]/[SUBMIT]/[JS] — act on the target tab (real interaction).
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "act") return;
+  pickTab(msg.urlMatch).then((tab) => {
+    if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
+    chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (action, selector, value, code, cap) => {
+        const q = (s) => document.querySelector(s);
+        try {
+          if (action === "click") {
+            const el = q(selector);
+            if (!el) return "(no match: " + selector + ")";
+            el.click();
+            return "clicked " + selector;
+          }
+          if (action === "fill" || action === "type") {
+            const el = q(selector);
+            if (!el) return "(no match: " + selector + ")";
+            el.focus();
+            const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement : HTMLInputElement;
+            const setter = Object.getOwnPropertyDescriptor(proto.prototype, "value");
+            if (setter && setter.set) { setter.set.call(el, value); } else { el.value = value; }
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            return "filled " + selector + " = " + value;
+          }
+          if (action === "submit") {
+            const el = q(selector);
+            if (!el) return "(no match: " + selector + ")";
+            if (el.tagName === "FORM") el.submit();
+            else if (el.form) el.form.submit();
+            else el.click();
+            return "submitted " + selector;
+          }
+          if (action === "js") {
+            // eslint-disable-next-line no-eval
+            const r = eval(code);
+            const s = typeof r === "object" ? JSON.stringify(r) : String(r);
+            return s.slice(0, cap);
+          }
+          return "(unknown action: " + action + ")";
+        } catch (e) { return action + " error: " + e; }
+      },
+      args: [msg.action, msg.selector || "", msg.value || "", msg.code || "", CAP],
+    }).then((res) => sendResponse({ text: res && res[0] ? String(res[0].result) : "(no result)" }))
+      .catch((e) => sendResponse({ text: "act error: " + e }));
   });
   return true; // async
 });
