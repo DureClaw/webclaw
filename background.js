@@ -112,9 +112,13 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "download") return;
   try {
-    chrome.downloads.download({ url: msg.url }, (id) => {
+    const opts = { url: msg.url, conflictAction: "uniquify" };
+    // Optional target sub-path under Downloads (sanitized) — keeps same-named
+    // files from different students apart.
+    if (msg.path) opts.filename = String(msg.path).replace(/\.\.(\/|\\)/g, "").replace(/^[/\\]+/, "");
+    chrome.downloads.download(opts, (id) => {
       if (chrome.runtime.lastError) sendResponse({ text: "download error: " + chrome.runtime.lastError.message });
-      else sendResponse({ text: "download started (id=" + id + "): " + msg.url });
+      else sendResponse({ text: "download started (id=" + id + ") → " + (opts.filename || msg.url) });
     });
   } catch (e) { sendResponse({ text: "download error: " + e }); }
   return true; // async

@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.3.1",
+          preferred_model: "browser", version: "webclaw/0.3.2",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -94,8 +94,13 @@
         const r = await fetch(rest.trim());
         return (await r.text()).slice(0, CAP);
       }
-      // [DOWNLOAD] <url> — real browser download to disk (session cookies incl.).
-      if (name === "DOWNLOAD" && hooks.download) return await hooks.download(rest.trim());
+      // [DOWNLOAD] <url> [:: <relative/path.ext>] — real browser download to disk
+      // (session cookies incl.). Optional target path saves into a sub-folder of
+      // Downloads (e.g. per-student) so many same-named files don't collide.
+      if (name === "DOWNLOAD" && hooks.download) {
+        const parts = rest.split(" :: ");
+        return await hooks.download(parts[0].trim(), (parts[1] || "").trim());
+      }
       // [DOM] <query> — read the target tab's DOM (empty query = page text).
       if (name === "DOM" && hooks.dom) return await hooks.dom(rest.trim(), urlMatch);
       // [TABS] — list open tabs so the master can target the logged-in session.
