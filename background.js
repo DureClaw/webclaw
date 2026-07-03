@@ -171,7 +171,7 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       args: [msg.query || "", CAP, msg.mode || "", msg.attr || ""],
     }).then((res) => {
       const out = res && res[0] ? res[0].result : "(no result)";
-      hudNotify(tab.id, "[" + (msg.mode || "dom").toUpperCase() + "] " + (msg.query || "(page)") + " → " + String(out).length + " chars"); // #10
+      hudNotify(tab.id, "[" + (msg.mode || "dom").toUpperCase() + "] " + (msg.query || "(page)") + " → " + String(out).length + " chars", null, true); // #10 working
       sendResponse({ text: out });
     }).catch((e) => sendResponse({ text: "scripting error: " + e }));
   });
@@ -269,10 +269,10 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 // so page CSP that forbids eval cannot block it): a glowing "agent is working
 // here" border, a ghost cursor on clicks, and a right-side action log panel so
 // the human can supervise what the agent does in their browser.
-function hudNotify(tabId, text, click) {
+function hudNotify(tabId, text, click, working) {
   return chrome.scripting.executeScript({
     target: { tabId },
-    func: (text, click, off) => {
+    func: (text, click, off, working) => {
       const ID = "__wc_hud";
       if (off) {
         const r = document.getElementById(ID); if (r) r.remove();
@@ -294,7 +294,9 @@ function hudNotify(tabId, text, click) {
         root.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647";
         const frame = document.createElement("div");
         frame.className = "f";
-        frame.style.cssText = "position:fixed;inset:0;border:7px solid #00ffcc;border-radius:12px;animation:__wcGlow 1.4s ease-in-out infinite;pointer-events:none";
+        // The glow border only shows *while an action is executing* (fades out
+        // a few seconds after the last action) — a steady blink is noise.
+        frame.style.cssText = "position:fixed;inset:0;border:7px solid #00ffcc;border-radius:12px;animation:__wcGlow 1.4s ease-in-out infinite;pointer-events:none;opacity:0;transition:opacity .4s";
         const panel = document.createElement("div");
         panel.className = "p";
         panel.style.cssText = "position:fixed;top:14px;right:14px;bottom:14px;width:280px;display:flex;flex-direction:column;background:rgba(10,12,24,.88);color:#c8ffee;font:11px/1.5 ui-monospace,monospace;border:1px solid #00ffcc;border-radius:10px;padding:10px;pointer-events:auto;backdrop-filter:blur(3px)";
@@ -321,6 +323,12 @@ function hudNotify(tabId, text, click) {
         root.append(frame, panel, cur);
         document.documentElement.appendChild(root);
       }
+      if (working) {
+        const frame = root.querySelector(".f");
+        frame.style.opacity = "1";
+        clearTimeout(window.__wcHudGlowT);
+        window.__wcHudGlowT = setTimeout(() => { frame.style.opacity = "0"; }, 3000);
+      }
       if (click && typeof click.x === "number") {
         const cur = root.querySelector(".c");
         cur.style.left = click.x - 4 + "px";
@@ -342,7 +350,7 @@ function hudNotify(tabId, text, click) {
       }
       return "hud ok";
     },
-    args: [text || "", click || null, text === "__OFF__"],
+    args: [text || "", click || null, text === "__OFF__", !!working],
   }).catch(() => {});
 }
 
@@ -429,7 +437,7 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       let click = null;
       const cm = out.match(/@(\d+),(\d+)$/);
       if (msg.action === "click" && cm) click = { x: +cm[1], y: +cm[2] };
-      hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (msg.selector || (msg.code || "").slice(0, 60)) + " → " + out.slice(0, 90), click);
+      hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (msg.selector || (msg.code || "").slice(0, 60)) + " → " + out.slice(0, 90), click, true); // working
       sendResponse({ text: out });
     }).catch((e) => sendResponse({ text: "act error: " + e }));
   });

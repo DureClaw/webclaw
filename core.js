@@ -29,6 +29,9 @@
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
         log("joined work:" + cfg.workKey + " as " + cfg.name);
         hooks.onStatus && hooks.onStatus("connected");
+        // expose the *actual* joined identity (instance-suffixed name etc.)
+        // so the popup can show exactly which node this browser is.
+        hooks.onJoined && hooks.onJoined({ name: cfg.name, bus: cfg.bus, workKey: cfg.workKey, version: "webclaw/0.4.3" });
       };
       ws.onmessage = (ev) => {
         let f; try { f = JSON.parse(ev.data); } catch (e) { return; }

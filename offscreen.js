@@ -18,6 +18,7 @@ async function start() {
   inst = createWebclaw(cfg, {
     onLog: (m) => save({ log: m }),
     onStatus: (s) => save({ status: s }),
+    onJoined: (info) => save({ activeCfg: info }),
     dom: (query, urlMatch) => new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "dom", query, urlMatch }, (r) => resolve((r && r.text) || "(no dom)"))),
     tabs: () => new Promise((resolve) =>
