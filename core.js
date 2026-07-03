@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.3.3",
+          preferred_model: "browser", version: "webclaw/0.3.4",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -112,6 +112,15 @@
       }
       // [DOWNLOAD?] <id> — status of a previously started download.
       if (name === "DOWNLOAD?" && hooks.downloadStatus) return await hooks.downloadStatus(rest.trim());
+      // [CANCEL] <id|all> — cancel in-progress download(s).
+      if (name === "CANCEL" && hooks.downloadCancel) return await hooks.downloadCancel(rest.trim());
+      // [LINKS] <css?> — anchors as [{text, href}] JSON (defaults to a[href]).
+      if (name === "LINKS" && hooks.domEx) return await hooks.domEx({ mode: "links", query: rest.trim(), urlMatch });
+      // [ATTR] <css> :: <attribute> — attribute values of matched elements.
+      if (name === "ATTR" && hooks.domEx) {
+        const parts = rest.split(" :: ");
+        return await hooks.domEx({ mode: "attr", query: (parts[0] || "").trim(), attr: (parts[1] || "").trim(), urlMatch });
+      }
       // [DOM] <query> — read the target tab's DOM (empty query = page text).
       if (name === "DOM" && hooks.dom) return await hooks.dom(rest.trim(), urlMatch);
       // [TABS] — list open tabs so the master can target the logged-in session.

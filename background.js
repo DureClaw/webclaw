@@ -102,6 +102,8 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 });
 
 // [DOM] hands — read the target tab's DOM (raised cap, waits out navigation).
+// mode "links" → [{text, href}] for anchors; mode "attr" → attribute values. (#8)
+// Over-cap output gets an explicit truncated trailer instead of a silent cut. (#9)
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "dom") return;
   pickTab(msg.urlMatch).then(async (tab) => {
@@ -109,15 +111,25 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     await waitTabReady(tab.id); // #4
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: (q, cap) => {
+      func: (q, cap, mode, attr) => {
+        const capped = (s) => (s.length > cap ? s.slice(0, cap) + "\n…[truncated, " + (s.length - cap) + " more bytes]" : s);
         try {
-          if (!q) return (document.title + " | " + location.href + "\n" + document.body.innerText).slice(0, cap);
+          if (mode === "links") {
+            const els = [...document.querySelectorAll(q || "a[href]")];
+            return capped(JSON.stringify(els.map((a) => ({ text: (a.innerText || "").trim().slice(0, 200), href: a.href }))));
+          }
+          if (mode === "attr") {
+            const els = [...document.querySelectorAll(q)];
+            if (!els.length) return "(no match for: " + q + ")";
+            return capped(JSON.stringify(els.map((e) => e.getAttribute(attr))));
+          }
+          if (!q) return capped(document.title + " | " + location.href + "\n" + document.body.innerText);
           const els = [...document.querySelectorAll(q)];
           if (!els.length) return "(no match for: " + q + ")";
-          return els.map((e) => (e.innerText || e.textContent || "").trim()).join("\n").slice(0, cap);
+          return capped(els.map((e) => (e.innerText || e.textContent || "").trim()).join("\n"));
         } catch (e) { return "DOM error: " + e; }
       },
-      args: [msg.query || "", CAP],
+      args: [msg.query || "", CAP, msg.mode || "", msg.attr || ""],
     }).then((res) => sendResponse({ text: res && res[0] ? res[0].result : "(no result)" }))
       .catch((e) => sendResponse({ text: "scripting error: " + e }));
   });
@@ -168,6 +180,11 @@ function waitDownloadDone(id, timeoutMs = DL_WAIT_MS) {
   });
 }
 
+// #7 — serialize downloads: browsers block bursts of automated downloads from
+// one site, and parallel dispatch causes duplicates on blind retry. Chain every
+// [DOWNLOAD] through a single promise queue (concurrency 1).
+let dlChain = Promise.resolve();
+
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "download") return;
   try {
@@ -176,14 +193,32 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       describeDownload(Number(msg.url)).then((text) => sendResponse({ text }));
       return true;
     }
+    // [CANCEL] <id|all> — stop a runaway download without manual browser UI. (#7)
+    if (msg.cancel) {
+      const target = String(msg.url).trim();
+      if (target === "all") {
+        chrome.downloads.search({ state: "in_progress" }, (items) => {
+          (items || []).forEach((d) => chrome.downloads.cancel(d.id));
+          sendResponse({ text: "cancelled " + (items || []).length + " in-progress download(s)" });
+        });
+      } else {
+        chrome.downloads.cancel(Number(target), () => {
+          if (chrome.runtime.lastError) sendResponse({ text: "cancel error: " + chrome.runtime.lastError.message });
+          else describeDownload(Number(target)).then((text) => sendResponse({ text }));
+        });
+      }
+      return true;
+    }
     const opts = { url: msg.url, conflictAction: "uniquify" };
     // Optional target sub-path under Downloads (sanitized) — keeps same-named
     // files from different sources apart.
     if (msg.path) opts.filename = String(msg.path).replace(/\.\.(\/|\\)/g, "").replace(/^[/\\]+/, "");
-    chrome.downloads.download(opts, (id) => {
-      if (chrome.runtime.lastError) sendResponse({ text: "download error: " + chrome.runtime.lastError.message });
-      else waitDownloadDone(id).then((text) => sendResponse({ text })); // #2
-    });
+    dlChain = dlChain.then(() => new Promise((resolveQueue) => {
+      chrome.downloads.download(opts, (id) => {
+        if (chrome.runtime.lastError) { sendResponse({ text: "download error: " + chrome.runtime.lastError.message }); resolveQueue(); }
+        else waitDownloadDone(id).then((text) => { sendResponse({ text }); resolveQueue(); }); // #2
+      });
+    })).catch(() => {});
   } catch (e) { sendResponse({ text: "download error: " + e }); }
   return true; // async
 });
@@ -237,10 +272,17 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
             let r = eval(code);
             if (r && typeof r.then === "function") r = await r; // #6 async support
             const s = typeof r === "object" ? JSON.stringify(r) : String(r);
-            return s.slice(0, cap);
+            return s.length > cap ? s.slice(0, cap) + "\n…[truncated, " + (s.length - cap) + " more bytes]" : s; // #9
           }
           return "(unknown action: " + action + ")";
-        } catch (e) { return action + " error: " + e; }
+        } catch (e) {
+          // #9 — distinguish "page policy" from "code bug": CSP'd pages reject
+          // eval; the static markers ([DOM]/[CLICK]/[FILL]/[SUBMIT]) still work.
+          const m = String(e);
+          if (action === "js" && /unsafe-eval|Content Security Policy|EvalError/i.test(m))
+            return "js blocked by page CSP (eval forbidden on this site) — use the static markers [DOM]/[CLICK]/[FILL]/[SUBMIT] instead. " + m;
+          return action + " error: " + e;
+        }
       },
       args: [msg.action, msg.selector || "", msg.value || "", msg.code || "", CAP],
     }).then((res) => sendResponse({ text: res && res[0] ? String(res[0].result) : "(no result)" }))
