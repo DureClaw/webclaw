@@ -53,6 +53,9 @@ curl -sf -H "Authorization: Bearer $SECRET" http://localhost:4000/api/task-resul
 | `[DOWNLOAD] <url> [:: <하위경로/파일명>]` | 세션 포함 실제 다운로드. **완료까지 대기** 후 최종 경로+바이트 반환 (120초 초과 시 `in_progress (id=N)`) | `download complete (id=N) → 경로 (N bytes)` |
 | `[DOWNLOAD?] <id>` | 진행 중 다운로드 상태 재조회 | 상태+경로+바이트 |
 | `[CANCEL] <id\|all>` | 다운로드 취소 | 취소 결과 |
+| `[HUD@site] on\|off` | **시각 감독 레이어**(v0.4.0+): 작업 중 탭 형광 테두리 + [CLICK] 시 고스트 커서·리플 + 우측 작업 로그 패널. dom/act 첫 실행 시 자동 표시 | `hud on @ tab N` |
+
+- **HUD는 CSP 무관** — 확장의 정적 함수 주입(isolated world)이라 [JS]가 막히는 사이트에서도 동작한다. 사용자가 지켜보는 브라우저에서 작업할 땐 `[HUD] on`으로 어느 탭에서 무엇을 하는지 보여주는 것이 예의다.
 
 - `[FILL]` 값에 ` = `가 들어가면 셀렉터와 값을 **개행으로 구분**하는 대체 문법 사용: `[FILL] <css>\n<값>`.
 - 마커 없는 instructions는 브레인(LLM)으로 위임된다 — 이 스킬에선 마커만 쓴다.
