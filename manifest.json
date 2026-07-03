@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "webclaw — DureClaw browser node",
-  "version": "0.4.7",
-  "description": "Join a DureClaw fleet from your browser. The master brings the brain; this node brings browser hands — fetch, DOM read, and now click/fill/submit/JS on a targeted tab. CORS-free, always-on.",
+  "version": "0.5.0",
+  "description": "DureClaw browser node + Wide Worker workspace: left task sidebar (tasks = tab groups), per-task chat, browser hands (fetch/DOM/click/fill/JS/download). CORS-free, always-on.",
   "permissions": [
     "offscreen",
     "storage",
     "scripting",
     "tabs",
+    "tabGroups",
     "downloads"
   ],
   "host_permissions": [
@@ -16,6 +17,14 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["workspace.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "webclaw"

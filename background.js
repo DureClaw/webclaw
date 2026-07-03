@@ -17,6 +17,90 @@ ensureOffscreen(); // run on SW load
 chrome.runtime.onInstalled.addListener(ensureOffscreen);
 chrome.runtime.onStartup.addListener(ensureOffscreen);
 
+// ===== Wide Worker workspace: tasks = tab groups, per-task chat (v0.5.0) =====
+// State: { tasks:[{id,name,groupId,chat:[{role,text}]}], activeId } in storage.
+async function wwGet() {
+  const { wwTasks = [], wwActive = null } = await chrome.storage.local.get(["wwTasks", "wwActive"]);
+  return { tasks: wwTasks, activeId: wwActive };
+}
+async function wwSet(tasks, activeId) {
+  await chrome.storage.local.set({ wwTasks: tasks, wwActive: activeId });
+  // ping open tabs so every workspace bar refreshes
+  const all = await chrome.tabs.query({});
+  all.forEach((t) => { try { chrome.tabs.sendMessage(t.id, { type: "wwUpdated" }); } catch {} });
+}
+async function wwNewTask(name) {
+  const { tabs } = await wwGetRaw();
+  // create the task's first tab and put it in a collapsed-able tab group
+  const win = await chrome.windows.getLastFocused();
+  const tab = await chrome.tabs.create({ url: `http://localhost:4111/`, windowId: win.id, active: true });
+  let groupId = null;
+  try {
+    groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+    await chrome.tabGroups.update(groupId, { title: name, color: "cyan" });
+  } catch {}
+  const id = "t" + Date.now();
+  tabs.push({ id, name, groupId, chat: [] });
+  await chrome.storage.local.set({ wwTasks: tabs, wwActive: id });
+  await wwSet(tabs, id);
+  return id;
+}
+async function wwGetRaw() { const { wwTasks = [] } = await chrome.storage.local.get("wwTasks"); return { tabs: wwTasks }; }
+async function wwSwitchTask(id) {
+  const { tabs } = await wwGetRaw();
+  const task = tabs.find((t) => t.id === id);
+  await chrome.storage.local.set({ wwActive: id });
+  // focus the group's tabs (uncollapse this one, collapse others)
+  for (const t of tabs) {
+    if (t.groupId == null) continue;
+    try { await chrome.tabGroups.update(t.groupId, { collapsed: t.id !== id }); } catch {}
+  }
+  if (task && task.groupId != null) {
+    try {
+      const gtabs = await chrome.tabs.query({ groupId: task.groupId });
+      if (gtabs[0]) await chrome.tabs.update(gtabs[0].id, { active: true });
+    } catch {}
+  }
+  await wwSet(tabs, id);
+}
+async function wwChat(id, text) {
+  const { tabs } = await wwGetRaw();
+  const task = tabs.find((t) => t.id === id) || tabs[0];
+  if (!task) return;
+  task.chat = task.chat || [];
+  task.chat.push({ role: "me", text });
+  await chrome.storage.local.set({ wwTasks: tabs });
+  await wwSet(tabs, id);
+  // ask the local brain, scoped to this task
+  const cfg = await readCfg();
+  let out = "두뇌가 설정되지 않았습니다.";
+  if (cfg.brainUrl) {
+    try {
+      const h = { "content-type": "application/json" };
+      if (cfg.brainToken) h.authorization = "Bearer " + cfg.brainToken;
+      const r = await fetch(String(cfg.brainUrl).replace(/\/$/, "") + "/brain/exec", {
+        method: "POST", headers: h,
+        body: JSON.stringify({ prompt: `작업 "${task.name}" 컨텍스트에서 사용자 요청에 한국어로 답하라.\n요청: ${text}` }),
+      });
+      const j = await r.json(); out = (j.output ?? j.error ?? "").trim() || "응답 없음";
+    } catch (e) { out = "brain 연결 실패: " + e; }
+  }
+  const cur = (await wwGetRaw()).tabs;
+  const t2 = cur.find((t) => t.id === task.id);
+  if (t2) { t2.chat.push({ role: "ai", text: out }); await chrome.storage.local.set({ wwTasks: cur }); await wwSet(cur, id); }
+}
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || !msg.type || !msg.type.startsWith("ww")) return;
+  (async () => {
+    if (msg.type === "wwState") { const s = await wwGet(); sendResponse({ ...s, open: false }); return; }
+    if (msg.type === "wwNewTask") { await wwNewTask(msg.name); sendResponse({ ok: true }); return; }
+    if (msg.type === "wwSwitchTask") { await wwSwitchTask(msg.id); sendResponse({ ok: true }); return; }
+    if (msg.type === "wwChat") { await wwChat(msg.id, msg.text); sendResponse({ ok: true }); return; }
+    sendResponse(null);
+  })();
+  return true; // async
+});
+
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (msg && msg.type === "connect") {
     ensureOffscreen()
