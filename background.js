@@ -17,6 +17,12 @@ ensureOffscreen(); // run on SW load
 chrome.runtime.onInstalled.addListener(ensureOffscreen);
 chrome.runtime.onStartup.addListener(ensureOffscreen);
 
+// Wide Worker side panel: clicking the toolbar icon opens the native aside; it
+// also stays available on every tab.
+try {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+} catch {}
+
 // ===== Wide Worker workspace: tasks = tab groups, per-task chat (v0.5.0) =====
 // State: { tasks:[{id,name,groupId,chat:[{role,text}]}], activeId } in storage.
 async function wwGet() {
@@ -31,17 +37,18 @@ async function wwSet(tasks, activeId) {
 }
 async function wwNewTask(name) {
   const { tabs } = await wwGetRaw();
-  // create the task's first tab and put it in a collapsed-able tab group
+  // create the task's first tab and put it in a collapsed-able tab group.
+  // Name is optional — the first chat message auto-titles the task.
+  const nm = name || "새 작업";
   const win = await chrome.windows.getLastFocused();
   const tab = await chrome.tabs.create({ url: `http://localhost:4111/`, windowId: win.id, active: true });
   let groupId = null;
   try {
     groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-    await chrome.tabGroups.update(groupId, { title: name, color: "cyan" });
+    await chrome.tabGroups.update(groupId, { title: nm, color: "cyan" });
   } catch {}
   const id = "t" + Date.now();
-  tabs.push({ id, name, groupId, chat: [] });
-  await chrome.storage.local.set({ wwTasks: tabs, wwActive: id });
+  tabs.push({ id, name: nm, groupId, chat: [], autoTitled: !!name });
   await wwSet(tabs, id);
   return id;
 }
@@ -87,7 +94,28 @@ async function wwChat(id, text) {
   }
   const cur = (await wwGetRaw()).tabs;
   const t2 = cur.find((t) => t.id === task.id);
-  if (t2) { t2.chat.push({ role: "ai", text: out }); await chrome.storage.local.set({ wwTasks: cur }); await wwSet(cur, id); }
+  if (t2) {
+    t2.chat.push({ role: "ai", text: out });
+    // Auto-title the task from its first message (ChatGPT-style) — once.
+    if (!t2.autoTitled && cfg.brainUrl) {
+      t2.autoTitled = true;
+      try {
+        const h = { "content-type": "application/json" };
+        if (cfg.brainToken) h.authorization = "Bearer " + cfg.brainToken;
+        const r = await fetch(String(cfg.brainUrl).replace(/\/$/, "") + "/brain/exec", {
+          method: "POST", headers: h,
+          body: JSON.stringify({ prompt: `다음 요청을 2~6자 한국어 제목으로 요약. 제목만 출력(따옴표·마침표 없이):\n${text}` }),
+        });
+        const j = await r.json();
+        const title = String(j.output ?? "").trim().replace(/^["'「]|["'」.]$/g, "").split("\n")[0].slice(0, 16);
+        if (title) {
+          t2.name = title;
+          if (t2.groupId != null) { try { await chrome.tabGroups.update(t2.groupId, { title }); } catch {} }
+        }
+      } catch {}
+    }
+    await wwSet(cur, id);
+  }
 }
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || !msg.type || !msg.type.startsWith("ww")) return;

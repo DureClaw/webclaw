@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "webclaw — DureClaw browser node",
-  "version": "0.5.0",
-  "description": "DureClaw browser node + Wide Worker workspace: left task sidebar (tasks = tab groups), per-task chat, browser hands (fetch/DOM/click/fill/JS/download). CORS-free, always-on.",
+  "version": "0.5.1",
+  "description": "DureClaw browser node + Wide Worker workspace: side panel with tasks (= tab groups) and per-task chat that auto-titles itself; browser hands (fetch/DOM/click/fill/JS/download). CORS-free, always-on.",
   "permissions": [
     "offscreen",
     "storage",
     "scripting",
     "tabs",
     "tabGroups",
+    "sidePanel",
     "downloads"
   ],
   "host_permissions": [
@@ -17,16 +18,10 @@
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["workspace.js"],
-      "run_at": "document_idle",
-      "all_frames": false
-    }
-  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "webclaw"
+    "default_title": "Wide Worker — 작업 패널 열기"
   }
 }

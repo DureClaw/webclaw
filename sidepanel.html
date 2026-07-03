@@ -1,0 +1,35 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Wide Worker</title>
+<style>
+  :root{--cyan:#00ffcc;--mag:#ff00ff}
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:#0a0c18;color:#dbe7f0;font:13px/1.5 -apple-system,"Segoe UI",system-ui,sans-serif;
+    display:flex;flex-direction:column;height:100vh}
+  .top{display:flex;align-items:center;gap:8px;padding:11px 12px;border-bottom:1px solid rgba(0,255,204,.15)}
+  .top .b{font-weight:800} .top .b span{background:linear-gradient(90deg,var(--cyan),var(--mag));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .top .st{margin-left:auto;font:11px ui-monospace,monospace;color:#8fa9bd;display:flex;gap:6px;align-items:center}
+  .dot{width:8px;height:8px;border-radius:50%;background:#64748b;box-shadow:0 0 6px currentColor}
+  .dot.on{background:var(--cyan);color:var(--cyan)} .dot.off{background:#e11d48;color:#e11d48}
+  .tasks{display:flex;gap:6px;overflow-x:auto;padding:9px 10px;border-bottom:1px solid rgba(0,255,204,.1)}
+  .task{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;cursor:pointer;white-space:nowrap;
+    border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);font-size:12px}
+  .task:hover{border-color:rgba(0,255,204,.4)} .task.active{border-color:var(--cyan);background:rgba(0,255,204,.12);color:#eafff9}
+  .task .d{width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--cyan),var(--mag))}
+  .add{padding:6px 11px;border-radius:999px;border:1px dashed rgba(0,255,204,.4);color:#9fe;cursor:pointer;font-size:12px;white-space:nowrap}
+  .log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:9px}
+  .empty{margin:auto;text-align:center;color:#6b8298}
+  .empty h2{font-size:16px;margin:0 0 4px;color:#bfe} .empty p{margin:0;font-size:12px}
+  .m{padding:9px 12px;border-radius:12px;max-width:92%;white-space:pre-wrap;word-break:break-word}
+  .me{align-self:flex-end;background:rgba(255,209,102,.14);border:1px solid rgba(255,209,102,.3)}
+  .ai{align-self:flex-start;background:rgba(0,255,204,.08);border:1px solid rgba(0,255,204,.2)}
+  .row{display:flex;gap:8px;padding:10px;border-top:1px solid rgba(0,255,204,.15)}
+  .row input{flex:1;padding:11px 13px;border-radius:11px;border:1px solid rgba(0,255,204,.3);background:rgba(0,0,0,.4);color:#eaf6ff;outline:none;font-size:13px}
+  .row input:focus{border-color:var(--cyan)}
+  .row button{border:0;border-radius:11px;padding:0 16px;font-weight:700;cursor:pointer;background:linear-gradient(90deg,var(--cyan),#38bdf8);color:#04121a}
+</style></head><body>
+  <div class="top"><span class="b">◇ <span>Wide Worker</span></span>
+    <span class="st"><span class="dot" id="dot"></span><span id="stat">…</span></span></div>
+  <div class="tasks" id="tasks"><span class="add" id="add">＋ 새 작업</span></div>
+  <div class="log" id="log"></div>
+  <div class="row"><input id="in" placeholder="지시를 입력하세요…" autofocus><button id="send">↵</button></div>
+<script src="sidepanel.js"></script></body></html>
