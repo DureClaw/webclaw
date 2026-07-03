@@ -55,6 +55,7 @@ curl -sf -H "Authorization: Bearer $SECRET" http://localhost:4000/api/task-resul
 | `[CANCEL] <id\|all>` | 다운로드 취소 | 취소 결과 |
 | `[HUD@site] on\|off` | **시각 감독 레이어**(v0.4.0+): 작업 중 탭 형광 테두리 + [CLICK] 시 고스트 커서·리플 + 우측 작업 로그 패널(+입력창) | `hud on @ tab N` |
 | `[SAY@site] <텍스트>` | 마스터의 답장을 HUD 패널에 🤖로 표시 (v0.4.1+) | `said @ tab N` |
+| `[OPEN] <url>` | **새 포그라운드 탭으로 열기**(사용자 세션, 로드 완료 대기) — "검색해봐" 류 지시는 결과를 긁어오지 말고 이걸로 사용자에게 직접 보여주는 것이 정답 (v0.4.2+) | `opened (tab N): 제목 — URL` |
 
 - **HUD는 CSP 무관** — 확장의 정적 함수 주입(isolated world)이라 [JS]가 막히는 사이트에서도 동작한다. 사용자가 지켜보는 브라우저에서 작업할 땐 `[HUD] on`으로 어느 탭에서 무엇을 하는지 보여주는 것이 예의다.
 
@@ -118,6 +119,7 @@ curl -sf -H "Authorization: Bearer $SECRET" \
 - **CSP 사이트에서 [JS] 불가**: `unsafe-eval` 금지 페이지에선 `js blocked by page CSP...` 응답이 온다 → `[DOM]/[LINKS]/[CLICK]/[FILL]/[SUBMIT]` 정적 마커로 우회.
 - **출력 2MB 캡**: 초과 시 끝에 `…[truncated, N more bytes]` 트레일러가 붙는다. 트레일러가 보이면 셀렉터로 범위를 좁혀 다시 읽어라 — 잘린 결과를 전체로 착각하지 말 것.
 - **응답 성공 ≠ 저장 완료**: 위 write→read-back 패턴을 생략하지 마라.
+- **discarded(메모리 해제) 탭**: v0.4.2+의 pickTab은 자동으로 스킵(활성·최근 탭 우선). 구버전에서는 "must request permission" 오류로 나타남.
 - **확장 업데이트 직후**: 노드가 재연결되는 동안 태스크가 유실될 수 있다. presence 재확인 후 디스패치.
 - **바이너리(FETCH)**: `[FETCH]`는 텍스트 전용 — PDF 등 바이너리는 `[DOWNLOAD]`로 받아 로컬에서 처리.
 - 소스: `~/dev/webclaw` (GitHub DureClaw/webclaw). 미해결: 버스 측 no_executor fail-fast(#5).
