@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.4.0",
+          preferred_model: "browser", version: "webclaw/0.4.1",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -69,7 +69,20 @@
     }
 
     connect();
-    return { disconnect() { closed = true; try { clearInterval(hb); ws && ws.close(); } catch (e) {} } };
+    return {
+      disconnect() { closed = true; try { clearInterval(hb); ws && ws.close(); } catch (e) {} },
+      // #11 — publish a human message from the on-page HUD into this node's
+      // fixed inbox slot ("hud-inbox-<node>") as a task.result, so any
+      // orchestrator can poll GET /api/task-result/<slot> with no bus changes.
+      publishInbox(text, meta) {
+        const payload = JSON.stringify({ text, url: (meta && meta.url) || "", seq: Date.now() });
+        send([joinRef, nref(), "work:" + cfg.workKey, "task.result", {
+          task_id: "hud-inbox-" + cfg.name, to: "http@controller", from: cfg.name,
+          status: "done", output: payload, exit_code: 0, backend: "webclaw-hud",
+        }]);
+        log("hud chat → inbox: " + String(text).slice(0, 60));
+      },
+    };
   }
 
   // Parse a leading marker: [NAME] or [NAME@<url-substring>] then the rest.
@@ -139,6 +152,8 @@
       // [HUD] on|off — visual supervision layer on the target tab: glowing
       // working-border, ghost cursor on clicks, on-page action log panel.
       if (name === "HUD" && hooks.act) return await hooks.act({ action: "hud", code: rest.trim() || "on", urlMatch });
+      // [SAY] <text> — master's chat reply rendered into the HUD panel.
+      if (name === "SAY" && hooks.act) return await hooks.act({ action: "say", code: rest, urlMatch });
     }
     // default → delegate LLM to the master brain (the master does the thinking).
     if (cfg.brainUrl) {

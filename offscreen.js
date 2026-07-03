@@ -2,7 +2,9 @@
 // NOTE: an offscreen document only gets `chrome.runtime` — NOT chrome.storage/tabs.
 // So config reads and state writes are proxied through the background service worker.
 let inst = null;
+const feed = []; // shared by onTask and HUD chat so neither overwrites the other
 const save = (patch) => { try { chrome.runtime.sendMessage({ type: "state", patch }); } catch (e) {} };
+const pushFeed = (e) => { feed.unshift(e); feed.splice(40); save({ feed }); };
 async function start() {
   // ask the background SW for config (it owns chrome.storage)
   let cfg = null;
@@ -13,7 +15,6 @@ async function start() {
   }
   if (!cfg || !cfg.bus) return;
   if (inst) inst.disconnect();
-  const feed = [];
   inst = createWebclaw(cfg, {
     onLog: (m) => save({ log: m }),
     onStatus: (s) => save({ status: s }),
@@ -31,12 +32,15 @@ async function start() {
       chrome.runtime.sendMessage({ type: "download", url: id, cancel: true }, (r) => resolve((r && r.text) || "(no result)"))),
     domEx: (p) => new Promise((resolve) =>
       chrome.runtime.sendMessage(Object.assign({ type: "dom" }, p), (r) => resolve((r && r.text) || "(no result)"))),
-    onTask: (t) => {
-      feed.unshift({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() });
-      feed.splice(40);
-      save({ feed });
-    },
+    onTask: (t) => pushFeed({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() }),
   });
 }
 chrome.runtime.onMessage.addListener((msg) => { if (msg && msg.type === "restart") start(); });
+// #11 — HUD chat from the page → publish into this node's bus inbox slot,
+// and mirror it into the popup feed.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.type !== "busInbox" || !inst || !inst.publishInbox) return;
+  inst.publishInbox(msg.text, { url: msg.url });
+  pushFeed({ dir: "out", name: "🧑 HUD", text: msg.text, at: new Date().toLocaleTimeString() });
+});
 start();

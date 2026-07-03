@@ -59,6 +59,25 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "state" && msg.patch) chrome.storage.local.set(msg.patch);
 });
 
+// #11 — HUD chat: a message typed into the on-page panel. Echo it locally and
+// forward to the offscreen node, which publishes it into the per-node inbox
+// slot on the bus (task_id "hud-inbox-<node>") for the orchestrator to poll.
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || msg.type !== "hudChat") return;
+  if (sender.tab && sender.tab.id) hudNotify(sender.tab.id, "🧑 나: " + msg.text);
+  chrome.runtime.sendMessage({ type: "busInbox", text: msg.text, url: msg.url || "" }).catch(() => {});
+});
+
+// Popup quick action — turn the HUD on for the active tab.
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "hudHere") return;
+  chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
+    if (!tab) { sendResponse({ ok: false }); return; }
+    hudNotify(tab.id, "HUD on — 이 탭에서 에이전트가 작업합니다").then(() => sendResponse({ ok: true }));
+  });
+  return true; // async
+});
+
 // Pick the target tab: a URL-substring match (to hit a specific logged-in
 // session across many tabs), else the active tab of the last focused window.
 async function pickTab(urlMatch) {
@@ -258,8 +277,23 @@ function hudNotify(tabId, text, click) {
         frame.style.cssText = "position:fixed;inset:0;border:7px solid #00ffcc;border-radius:12px;animation:__wcGlow 1.4s ease-in-out infinite;pointer-events:none";
         const panel = document.createElement("div");
         panel.className = "p";
-        panel.style.cssText = "position:fixed;top:14px;right:14px;bottom:14px;width:280px;overflow-y:auto;background:rgba(10,12,24,.88);color:#c8ffee;font:11px/1.5 ui-monospace,monospace;border:1px solid #00ffcc;border-radius:10px;padding:10px;pointer-events:auto;backdrop-filter:blur(3px)";
-        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>🤖 webclaw 작업 로그</div>";
+        panel.style.cssText = "position:fixed;top:14px;right:14px;bottom:14px;width:280px;display:flex;flex-direction:column;background:rgba(10,12,24,.88);color:#c8ffee;font:11px/1.5 ui-monospace,monospace;border:1px solid #00ffcc;border-radius:10px;padding:10px;pointer-events:auto;backdrop-filter:blur(3px)";
+        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>🤖 webclaw 작업 로그</div><div class='lines' style='flex:1;overflow-y:auto'></div>";
+        // #11 — two-way chat: the human can instruct the agent from the page.
+        const input = document.createElement("input");
+        input.className = "chat";
+        input.placeholder = "에이전트에게 지시… (Enter)";
+        input.style.cssText = "margin-top:8px;padding:6px 8px;border:1px solid #00ffcc;border-radius:7px;background:rgba(0,0,0,.5);color:#c8ffee;font:11px ui-monospace,monospace;outline:none";
+        input.addEventListener("keydown", (ev) => {
+          if (ev.key !== "Enter" || !input.value.trim()) return;
+          ev.stopPropagation();
+          const t = input.value.trim();
+          input.value = "";
+          try { chrome.runtime.sendMessage({ type: "hudChat", text: t, url: location.href }); } catch (e) {}
+        });
+        input.addEventListener("keydown", (ev) => ev.stopPropagation());
+        input.addEventListener("keyup", (ev) => ev.stopPropagation());
+        panel.appendChild(input);
         const cur = document.createElement("div");
         cur.className = "c";
         cur.style.cssText = "position:fixed;left:-100px;top:-100px;width:26px;height:26px;pointer-events:none;transition:left .35s ease,top .35s ease;font-size:22px;line-height:1;filter:drop-shadow(0 0 6px #ff00ff)";
@@ -277,13 +311,14 @@ function hudNotify(tabId, text, click) {
         setTimeout(() => rip.remove(), 900);
       }
       if (text) {
-        const panel = root.querySelector(".p");
+        const lines = root.querySelector(".p .lines");
         const line = document.createElement("div");
-        line.style.cssText = "margin:2px 0;border-bottom:1px dashed rgba(0,255,204,.15);padding-bottom:2px;word-break:break-all";
-        line.textContent = new Date().toLocaleTimeString().slice(0, 8) + " " + String(text).slice(0, 160);
-        panel.appendChild(line);
-        while (panel.children.length > 61) panel.removeChild(panel.children[1]);
-        panel.scrollTop = panel.scrollHeight;
+        const isChat = /^(🧑|🤖 master)/.test(String(text));
+        line.style.cssText = "margin:2px 0;border-bottom:1px dashed rgba(0,255,204,.15);padding-bottom:2px;word-break:break-all" + (isChat ? ";color:#ffd166" : "");
+        line.textContent = new Date().toLocaleTimeString().slice(0, 8) + " " + String(text).slice(0, 300);
+        lines.appendChild(line);
+        while (lines.children.length > 80) lines.removeChild(lines.children[0]);
+        lines.scrollTop = lines.scrollHeight;
       }
       return "hud ok";
     },
@@ -306,6 +341,12 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       const on = String(msg.code || "").trim() !== "off";
       hudNotify(tab.id, on ? "HUD on — 이 탭에서 에이전트가 작업합니다" : "__OFF__")
         .then(() => sendResponse({ text: "hud " + (on ? "on" : "off") + " @ tab " + tab.id }));
+      return;
+    }
+    // [SAY] <text> — master's reply rendered into the HUD chat panel. (#11)
+    if (msg.action === "say") {
+      hudNotify(tab.id, "🤖 master: " + String(msg.code || ""))
+        .then(() => sendResponse({ text: "said @ tab " + tab.id }));
       return;
     }
     chrome.scripting.executeScript({
