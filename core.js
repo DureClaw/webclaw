@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.4.2",
+          preferred_model: "browser", version: "webclaw/0.4.4",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -31,7 +31,7 @@
         hooks.onStatus && hooks.onStatus("connected");
         // expose the *actual* joined identity (instance-suffixed name etc.)
         // so the popup can show exactly which node this browser is.
-        hooks.onJoined && hooks.onJoined({ name: cfg.name, bus: cfg.bus, workKey: cfg.workKey, version: "webclaw/0.4.3" });
+        hooks.onJoined && hooks.onJoined({ name: cfg.name, bus: cfg.bus, workKey: cfg.workKey, version: "webclaw/0.4.4" });
       };
       ws.onmessage = (ev) => {
         let f; try { f = JSON.parse(ev.data); } catch (e) { return; }

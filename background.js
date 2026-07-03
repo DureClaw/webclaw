@@ -269,10 +269,37 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 // so page CSP that forbids eval cannot block it): a glowing "agent is working
 // here" border, a ghost cursor on clicks, and a right-side action log panel so
 // the human can supervise what the agent does in their browser.
+// Persistent chat history (like a session): survives page navigations and
+// revisits, so the human and the agent can pick a conversation back up.
+async function hudHistory(entry) {
+  const { chatHistory = [] } = await chrome.storage.local.get("chatHistory");
+  if (entry) {
+    chatHistory.push(entry);
+    while (chatHistory.length > 200) chatHistory.shift();
+    await chrome.storage.local.set({ chatHistory });
+  }
+  return chatHistory.slice(-60);
+}
+
 function hudNotify(tabId, text, click, working) {
-  return chrome.scripting.executeScript({
-    target: { tabId },
-    func: (text, click, off, working) => {
+  const run = async () => {
+    let hist = [];
+    if (text && text !== "__OFF__") {
+      const kind = text.startsWith("🧑") ? "user" : text.startsWith("🤖 master") ? "master" : "action";
+      hist = await hudHistory({ at: new Date().toLocaleTimeString().slice(0, 8), kind, text: String(text).slice(0, 300) });
+    } else if (text !== "__OFF__") {
+      hist = await hudHistory(null);
+    }
+    return chrome.scripting.executeScript({
+      target: { tabId },
+      func: hudInjected,
+      args: [text || "", click || null, text === "__OFF__", !!working, hist],
+    });
+  };
+  return run().catch(() => {});
+}
+
+function hudInjected(text, click, off, working, hist) {
       const ID = "__wc_hud";
       if (off) {
         const r = document.getElementById(ID); if (r) r.remove();
@@ -300,7 +327,7 @@ function hudNotify(tabId, text, click, working) {
         const panel = document.createElement("div");
         panel.className = "p";
         panel.style.cssText = "position:fixed;top:14px;right:14px;bottom:14px;width:280px;display:flex;flex-direction:column;background:rgba(10,12,24,.88);color:#c8ffee;font:11px/1.5 ui-monospace,monospace;border:1px solid #00ffcc;border-radius:10px;padding:10px;pointer-events:auto;backdrop-filter:blur(3px)";
-        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>🤖 webclaw 작업 로그</div><div class='lines' style='flex:1;overflow-y:auto'></div>";
+        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>💬 webclaw chat</div><div class='lines' style='flex:1;overflow-y:auto'></div>";
         // #11 — two-way chat: the human can instruct the agent from the page.
         const input = document.createElement("input");
         input.className = "chat";
@@ -338,20 +365,27 @@ function hudNotify(tabId, text, click, working) {
         root.appendChild(rip);
         setTimeout(() => rip.remove(), 900);
       }
-      if (text) {
-        const lines = root.querySelector(".p .lines");
+      // Render the persisted conversation (session-like): on a fresh panel the
+      // whole recent history is restored — the current `text` is already its
+      // last entry — so the dialogue continues across page navigations.
+      const lines = root.querySelector(".p .lines");
+      const addLine = (at, kind, txt) => {
         const line = document.createElement("div");
-        const isChat = /^(🧑|🤖 master)/.test(String(text));
-        line.style.cssText = "margin:2px 0;border-bottom:1px dashed rgba(0,255,204,.15);padding-bottom:2px;word-break:break-all" + (isChat ? ";color:#ffd166" : "");
-        line.textContent = new Date().toLocaleTimeString().slice(0, 8) + " " + String(text).slice(0, 300);
+        const color = kind === "user" ? ";color:#ffd166" : kind === "master" ? ";color:#7ef9dd" : ";color:#8fa3b8;font-size:10px";
+        line.style.cssText = "margin:2px 0;border-bottom:1px dashed rgba(0,255,204,.12);padding-bottom:2px;word-break:break-all" + color;
+        line.textContent = at + " " + txt;
         lines.appendChild(line);
-        while (lines.children.length > 80) lines.removeChild(lines.children[0]);
-        lines.scrollTop = lines.scrollHeight;
+      };
+      if (lines.dataset.restored !== "1") {
+        lines.dataset.restored = "1";
+        (hist || []).forEach((h) => addLine(h.at, h.kind, h.text));
+      } else if (text) {
+        const kind = text.startsWith("🧑") ? "user" : text.startsWith("🤖 master") ? "master" : "action";
+        addLine(new Date().toLocaleTimeString().slice(0, 8), kind, String(text).slice(0, 300));
       }
+      while (lines.children.length > 80) lines.removeChild(lines.children[0]);
+      lines.scrollTop = lines.scrollHeight;
       return "hud ok";
-    },
-    args: [text || "", click || null, text === "__OFF__", !!working],
-  }).catch(() => {});
 }
 
 // [CLICK]/[FILL]/[TYPE]/[SUBMIT]/[JS] — act on the target tab (real interaction).
