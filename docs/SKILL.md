@@ -53,9 +53,22 @@ curl -sf -H "Authorization: Bearer $SECRET" http://localhost:4000/api/task-resul
 | `[DOWNLOAD] <url> [:: <하위경로/파일명>]` | 세션 포함 실제 다운로드. **완료까지 대기** 후 최종 경로+바이트 반환 (120초 초과 시 `in_progress (id=N)`) | `download complete (id=N) → 경로 (N bytes)` |
 | `[DOWNLOAD?] <id>` | 진행 중 다운로드 상태 재조회 | 상태+경로+바이트 |
 | `[CANCEL] <id\|all>` | 다운로드 취소 | 취소 결과 |
-| `[HUD@site] on\|off` | **시각 감독 레이어**(v0.4.0+): 작업 중 탭 형광 테두리 + [CLICK] 시 고스트 커서·리플 + 우측 작업 로그 패널. dom/act 첫 실행 시 자동 표시 | `hud on @ tab N` |
+| `[HUD@site] on\|off` | **시각 감독 레이어**(v0.4.0+): 작업 중 탭 형광 테두리 + [CLICK] 시 고스트 커서·리플 + 우측 작업 로그 패널(+입력창) | `hud on @ tab N` |
+| `[SAY@site] <텍스트>` | 마스터의 답장을 HUD 패널에 🤖로 표시 (v0.4.1+) | `said @ tab N` |
 
 - **HUD는 CSP 무관** — 확장의 정적 함수 주입(isolated world)이라 [JS]가 막히는 사이트에서도 동작한다. 사용자가 지켜보는 브라우저에서 작업할 땐 `[HUD] on`으로 어느 탭에서 무엇을 하는지 보여주는 것이 예의다.
+
+### 양방향 HUD 채팅 — 페이지에서 직접 지시 받기 (v0.4.1+)
+사용자가 HUD 패널 하단 입력창에 지시를 입력하면(Enter), 노드의 **고정 인박스 슬롯**에 게시된다. 마스터는 이 슬롯을 폴링해 수신한다:
+```bash
+# 슬롯 ID = hud-inbox-<노드명> (@는 %40으로 인코딩)
+curl -sf -H "Authorization: Bearer $SECRET" \
+  "http://localhost:4000/api/task-result/hud-inbox-webclaw%40chrome-XXXX"
+# → output = {"text":"<사용자 지시>","url":"<입력한 탭>","seq":<타임스탬프>}
+```
+- **seq를 기억**하고 이전 seq와 같으면 새 메시지 없음(슬롯은 최신 1건만 유지 — 덮어쓰기).
+- 사용자와 상호작용 세션 중에는 2~5초 간격 폴링, 지시 수신 → 수행 → `[SAY]`로 결과 회신 루프.
+- 사용자 입력은 HUD 패널(🧑)과 팝업 피드에도 에코된다.
 
 - `[FILL]` 값에 ` = `가 들어가면 셀렉터와 값을 **개행으로 구분**하는 대체 문법 사용: `[FILL] <css>\n<값>`.
 - 마커 없는 instructions는 브레인(LLM)으로 위임된다 — 이 스킬에선 마커만 쓴다.
