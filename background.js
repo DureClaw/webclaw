@@ -62,15 +62,65 @@ chrome.runtime.onMessage.addListener((msg) => {
 // #11 — HUD chat: a message typed into the on-page panel. Echo it locally and
 // forward to the offscreen node, which publishes it into the per-node inbox
 // slot on the bus (task_id "hud-inbox-<node>") for the orchestrator to poll.
+// Read effective config (chrome.storage.cfg, else bundled config.local.json).
+async function readCfg() {
+  let { cfg } = await chrome.storage.local.get("cfg");
+  if (!cfg) { try { cfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) {} }
+  return cfg || {};
+}
+
+// Standalone brain call: ask the local Wide Worker brain to turn a chat line
+// into ONE webclaw marker (or a plain answer), run it, and reply — so a single
+// machine works with no fleet master polling the inbox.
+async function standaloneHandle(tabId, text, url) {
+  const cfg = await readCfg();
+  const prompt =
+    "You drive a browser via single-line markers. Given the user's request, reply with EXACTLY ONE line:\n" +
+    "- to search/open a site: [OPEN] <url>\n- to read: [DOM] <css?>\n- to click: [CLICK] <css>\n" +
+    "- to fill: [FILL] <css> = <value>\n- to download: [DOWNLOAD] <url> [:: name]\n" +
+    "- otherwise answer the user in one short sentence (no marker).\n" +
+    "Current tab: " + (url || "") + "\nUser: " + text;
+  const h = { "content-type": "application/json" };
+  if (cfg.brainToken) h.authorization = "Bearer " + cfg.brainToken;
+  let out = "";
+  try {
+    const r = await fetch(String(cfg.brainUrl).replace(/\/$/, "") + "/brain/exec", {
+      method: "POST", headers: h, body: JSON.stringify({ prompt }),
+    });
+    const j = await r.json();
+    out = (j.output ?? j.error ?? "").trim();
+  } catch (e) { out = "brain 연결 실패: " + e; }
+
+  const line = out.split("\n").find((l) => l.trim().startsWith("[")) || out;
+  const mk = line.match(/^\s*\[([A-Za-z]+\??)\]/);
+  if (mk) {
+    // execute the chosen marker locally (reuse the same handlers)
+    const rest = line.replace(/^\s*\[[A-Za-z?]+\]\s*/, "").trim();
+    const name = mk[1].toUpperCase();
+    hudNotify(tabId, "🤖 " + line, null, true);
+    if (name === "OPEN") { const t = await pickTab(); await new Promise((res) => chrome.runtime.sendMessage({ type: "open", url: rest }, res)); }
+    // (other markers can be wired here; OPEN covers the common "검색/열기" case)
+  } else {
+    hudNotify(tabId, "🤖 master: " + out.slice(0, 300));
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || msg.type !== "hudChat") return;
-  if (sender.tab && sender.tab.id) {
-    hudNotify(sender.tab.id, "🧑 나: " + msg.text);
-    // remember the conversation tab so tab-independent events (downloads…)
-    // can be mirrored there with a [전체] badge.
-    chrome.storage.local.set({ lastChatTabId: sender.tab.id });
+  const tabId = sender.tab && sender.tab.id;
+  if (tabId) {
+    hudNotify(tabId, "🧑 나: " + msg.text);
+    chrome.storage.local.set({ lastChatTabId: tabId });
   }
-  chrome.runtime.sendMessage({ type: "busInbox", text: msg.text, url: msg.url || "" }).catch(() => {});
+  readCfg().then((cfg) => {
+    if (cfg.standalone && cfg.brainUrl) {
+      // single-machine: process locally, no bus/master needed.
+      if (tabId) standaloneHandle(tabId, msg.text, msg.url || "");
+    } else {
+      // fleet mode: publish to the inbox for a remote master to pick up.
+      chrome.runtime.sendMessage({ type: "busInbox", text: msg.text, url: msg.url || "" }).catch(() => {});
+    }
+  });
 });
 
 // Popup quick action — turn the HUD on for the active tab.
