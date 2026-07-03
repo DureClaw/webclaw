@@ -64,7 +64,12 @@ chrome.runtime.onMessage.addListener((msg) => {
 // slot on the bus (task_id "hud-inbox-<node>") for the orchestrator to poll.
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || msg.type !== "hudChat") return;
-  if (sender.tab && sender.tab.id) hudNotify(sender.tab.id, "🧑 나: " + msg.text);
+  if (sender.tab && sender.tab.id) {
+    hudNotify(sender.tab.id, "🧑 나: " + msg.text);
+    // remember the conversation tab so tab-independent events (downloads…)
+    // can be mirrored there with a [전체] badge.
+    chrome.storage.local.set({ lastChatTabId: sender.tab.id });
+  }
   chrome.runtime.sendMessage({ type: "busInbox", text: msg.text, url: msg.url || "" }).catch(() => {});
 });
 
@@ -261,7 +266,14 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     dlChain = dlChain.then(() => new Promise((resolveQueue) => {
       chrome.downloads.download(opts, (id) => {
         if (chrome.runtime.lastError) { sendResponse({ text: "download error: " + chrome.runtime.lastError.message }); resolveQueue(); }
-        else waitDownloadDone(id).then((text) => { sendResponse({ text }); resolveQueue(); }); // #2
+        else waitDownloadDone(id).then(async (text) => {
+          // Downloads are tab-independent → mirror into the conversation tab
+          // with a [전체] (global) badge instead of every tab's panel.
+          const { lastChatTabId } = await chrome.storage.local.get("lastChatTabId");
+          if (lastChatTabId) hudNotify(lastChatTabId, "⬇️ " + text.slice(0, 140), null, true, "global");
+          sendResponse({ text });
+          resolveQueue();
+        }); // #2
       });
     })).catch(() => {});
   } catch (e) { sendResponse({ text: "download error: " + e }); }
@@ -272,37 +284,52 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 // so page CSP that forbids eval cannot block it): a glowing "agent is working
 // here" border, a ghost cursor on clicks, and a right-side action log panel so
 // the human can supervise what the agent does in their browser.
-// Persistent chat history (like a session): survives page navigations and
-// revisits, so the human and the agent can pick a conversation back up.
-async function hudHistory(entry) {
-  const { chatHistory = [] } = await chrome.storage.local.get("chatHistory");
+// Persistent chat history, **scoped per tab** (like one session per tab):
+// survives page navigations within the tab, but other tabs don't see it.
+// Tab-independent events (downloads etc.) are mirrored into the conversation
+// tab with a [전체] (global) badge so scopes are distinguishable.
+async function hudHistory(tabId, entry) {
+  const { chatHistories = {} } = await chrome.storage.local.get("chatHistories");
+  const key = String(tabId);
+  const hist = chatHistories[key] || [];
   if (entry) {
-    chatHistory.push(entry);
-    while (chatHistory.length > 200) chatHistory.shift();
-    await chrome.storage.local.set({ chatHistory });
+    hist.push(entry);
+    while (hist.length > 120) hist.shift();
+    chatHistories[key] = hist;
+    await chrome.storage.local.set({ chatHistories });
   }
-  return chatHistory.slice(-60);
+  return hist.slice(-60);
 }
 
-function hudNotify(tabId, text, click, working) {
+// Closed tab → drop its conversation (a session ends with its tab).
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const { chatHistories = {} } = await chrome.storage.local.get("chatHistories");
+  if (chatHistories[String(tabId)]) {
+    delete chatHistories[String(tabId)];
+    chrome.storage.local.set({ chatHistories });
+  }
+});
+
+function hudNotify(tabId, text, click, working, scope) {
   const run = async () => {
     let hist = [];
     if (text && text !== "__OFF__") {
       const kind = text.startsWith("🧑") ? "user" : text.startsWith("🤖 master") ? "master" : "action";
-      hist = await hudHistory({ at: new Date().toLocaleTimeString().slice(0, 8), kind, text: String(text).slice(0, 300) });
+      const shown = (scope === "global" ? "[전체] " : "") + String(text).slice(0, 300);
+      hist = await hudHistory(tabId, { at: new Date().toLocaleTimeString().slice(0, 8), kind, text: shown });
     } else if (text !== "__OFF__") {
-      hist = await hudHistory(null);
+      hist = await hudHistory(tabId, null);
     }
     return chrome.scripting.executeScript({
       target: { tabId },
       func: hudInjected,
-      args: [text || "", click || null, text === "__OFF__", !!working, hist],
+      args: [text || "", click || null, text === "__OFF__", !!working, hist, scope || "tab"],
     });
   };
   return run().catch(() => {});
 }
 
-function hudInjected(text, click, off, working, hist) {
+function hudInjected(text, click, off, working, hist, scope) {
       const ID = "__wc_hud";
       if (off) {
         const r = document.getElementById(ID); if (r) r.remove();
@@ -330,7 +357,7 @@ function hudInjected(text, click, off, working, hist) {
         const panel = document.createElement("div");
         panel.className = "p";
         panel.style.cssText = "position:fixed;top:14px;right:14px;bottom:14px;width:280px;display:flex;flex-direction:column;background:rgba(10,12,24,.88);color:#c8ffee;font:11px/1.5 ui-monospace,monospace;border:1px solid #00ffcc;border-radius:10px;padding:10px;pointer-events:auto;backdrop-filter:blur(3px)";
-        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>💬 webclaw chat</div><div class='lines' style='flex:1;overflow-y:auto'></div>";
+        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>💬 webclaw chat <span style='color:#8fa3b8;font-weight:400;font-size:10px'>— 이 탭의 대화</span></div><div class='lines' style='flex:1;overflow-y:auto'></div>";
         // #11 — two-way chat: the human can instruct the agent from the page.
         const input = document.createElement("input");
         input.className = "chat";
@@ -384,7 +411,7 @@ function hudInjected(text, click, off, working, hist) {
         (hist || []).forEach((h) => addLine(h.at, h.kind, h.text));
       } else if (text) {
         const kind = text.startsWith("🧑") ? "user" : text.startsWith("🤖 master") ? "master" : "action";
-        addLine(new Date().toLocaleTimeString().slice(0, 8), kind, String(text).slice(0, 300));
+        addLine(new Date().toLocaleTimeString().slice(0, 8), kind, (scope === "global" ? "[전체] " : "") + String(text).slice(0, 300));
       }
       while (lines.children.length > 80) lines.removeChild(lines.children[0]);
       lines.scrollTop = lines.scrollHeight;
