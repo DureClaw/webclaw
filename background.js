@@ -251,7 +251,10 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       }
       return true;
     }
-    const opts = { url: msg.url, conflictAction: "uniquify" };
+    // saveAs:false suppresses the per-file "Save as" dialog even when the
+    // browser is configured to ask for a location — automated downloads land
+    // directly in Downloads/ (or the given sub-path) with no human click.
+    const opts = { url: msg.url, conflictAction: "uniquify", saveAs: false };
     // Optional target sub-path under Downloads (sanitized) — keeps same-named
     // files from different sources apart.
     if (msg.path) opts.filename = String(msg.path).replace(/\.\.(\/|\\)/g, "").replace(/^[/\\]+/, "");
