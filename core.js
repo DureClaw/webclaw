@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.3.4",
+          preferred_model: "browser", version: "webclaw/0.4.0",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -136,6 +136,9 @@
       if (name === "SUBMIT" && hooks.act) return await hooks.act({ action: "submit", selector: rest.trim(), urlMatch });
       // [JS] <code> — run JS in the target page, return the result (grading etc.).
       if (name === "JS" && hooks.act) return await hooks.act({ action: "js", code: rest, urlMatch });
+      // [HUD] on|off — visual supervision layer on the target tab: glowing
+      // working-border, ghost cursor on clicks, on-page action log panel.
+      if (name === "HUD" && hooks.act) return await hooks.act({ action: "hud", code: rest.trim() || "on", urlMatch });
     }
     // default → delegate LLM to the master brain (the master does the thinking).
     if (cfg.brainUrl) {

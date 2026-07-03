@@ -130,8 +130,11 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         } catch (e) { return "DOM error: " + e; }
       },
       args: [msg.query || "", CAP, msg.mode || "", msg.attr || ""],
-    }).then((res) => sendResponse({ text: res && res[0] ? res[0].result : "(no result)" }))
-      .catch((e) => sendResponse({ text: "scripting error: " + e }));
+    }).then((res) => {
+      const out = res && res[0] ? res[0].result : "(no result)";
+      hudNotify(tab.id, "[" + (msg.mode || "dom").toUpperCase() + "] " + (msg.query || "(page)") + " → " + String(out).length + " chars"); // #10
+      sendResponse({ text: out });
+    }).catch((e) => sendResponse({ text: "scripting error: " + e }));
   });
   return true; // async
 });
@@ -223,6 +226,71 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   return true; // async
 });
 
+// #10 — visual HUD injected as a *static* extension function (isolated world,
+// so page CSP that forbids eval cannot block it): a glowing "agent is working
+// here" border, a ghost cursor on clicks, and a right-side action log panel so
+// the human can supervise what the agent does in their browser.
+function hudNotify(tabId, text, click) {
+  return chrome.scripting.executeScript({
+    target: { tabId },
+    func: (text, click, off) => {
+      const ID = "__wc_hud";
+      if (off) {
+        const r = document.getElementById(ID); if (r) r.remove();
+        const s = document.getElementById(ID + "_style"); if (s) s.remove();
+        return "hud off";
+      }
+      if (!document.getElementById(ID + "_style")) {
+        const s = document.createElement("style");
+        s.id = ID + "_style";
+        s.textContent =
+          "@keyframes __wcGlow{0%,100%{box-shadow:inset 0 0 28px 6px #00ffcc;border-color:#00ffcc}50%{box-shadow:inset 0 0 64px 16px #ff00ff;border-color:#ff00ff}}" +
+          "@keyframes __wcRipple{from{transform:scale(.35);opacity:.95}to{transform:scale(2.6);opacity:0}}";
+        document.documentElement.appendChild(s);
+      }
+      let root = document.getElementById(ID);
+      if (!root) {
+        root = document.createElement("div");
+        root.id = ID;
+        root.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647";
+        const frame = document.createElement("div");
+        frame.className = "f";
+        frame.style.cssText = "position:fixed;inset:0;border:7px solid #00ffcc;border-radius:12px;animation:__wcGlow 1.4s ease-in-out infinite;pointer-events:none";
+        const panel = document.createElement("div");
+        panel.className = "p";
+        panel.style.cssText = "position:fixed;top:14px;right:14px;bottom:14px;width:280px;overflow-y:auto;background:rgba(10,12,24,.88);color:#c8ffee;font:11px/1.5 ui-monospace,monospace;border:1px solid #00ffcc;border-radius:10px;padding:10px;pointer-events:auto;backdrop-filter:blur(3px)";
+        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>🤖 webclaw 작업 로그</div>";
+        const cur = document.createElement("div");
+        cur.className = "c";
+        cur.style.cssText = "position:fixed;left:-100px;top:-100px;width:26px;height:26px;pointer-events:none;transition:left .35s ease,top .35s ease;font-size:22px;line-height:1;filter:drop-shadow(0 0 6px #ff00ff)";
+        cur.textContent = "🖱️";
+        root.append(frame, panel, cur);
+        document.documentElement.appendChild(root);
+      }
+      if (click && typeof click.x === "number") {
+        const cur = root.querySelector(".c");
+        cur.style.left = click.x - 4 + "px";
+        cur.style.top = click.y - 2 + "px";
+        const rip = document.createElement("div");
+        rip.style.cssText = "position:fixed;left:" + (click.x - 18) + "px;top:" + (click.y - 18) + "px;width:36px;height:36px;border:3px solid #ff00ff;border-radius:50%;animation:__wcRipple .8s ease-out forwards;pointer-events:none";
+        root.appendChild(rip);
+        setTimeout(() => rip.remove(), 900);
+      }
+      if (text) {
+        const panel = root.querySelector(".p");
+        const line = document.createElement("div");
+        line.style.cssText = "margin:2px 0;border-bottom:1px dashed rgba(0,255,204,.15);padding-bottom:2px;word-break:break-all";
+        line.textContent = new Date().toLocaleTimeString().slice(0, 8) + " " + String(text).slice(0, 160);
+        panel.appendChild(line);
+        while (panel.children.length > 61) panel.removeChild(panel.children[1]);
+        panel.scrollTop = panel.scrollHeight;
+      }
+      return "hud ok";
+    },
+    args: [text || "", click || null, text === "__OFF__"],
+  }).catch(() => {});
+}
+
 // [CLICK]/[FILL]/[TYPE]/[SUBMIT]/[JS] — act on the target tab (real interaction).
 // #6 — the injected function is async and awaits thenable eval results, so [JS]
 // bodies can use `await` (via async IIFE) for wait-then-read workflows.
@@ -233,6 +301,13 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   pickTab(msg.urlMatch).then(async (tab) => {
     if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
     await waitTabReady(tab.id); // #4
+    // [HUD] on|off — manual toggle of the visual supervision layer. (#10)
+    if (msg.action === "hud") {
+      const on = String(msg.code || "").trim() !== "off";
+      hudNotify(tab.id, on ? "HUD on — 이 탭에서 에이전트가 작업합니다" : "__OFF__")
+        .then(() => sendResponse({ text: "hud " + (on ? "on" : "off") + " @ tab " + tab.id }));
+      return;
+    }
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: async (action, selector, value, code, cap) => {
@@ -241,8 +316,9 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
           if (action === "click") {
             const el = q(selector);
             if (!el) return "(no match: " + selector + ")";
+            const r = el.getBoundingClientRect();
             el.click();
-            return "clicked " + selector;
+            return "clicked " + selector + " @" + Math.round(r.left + r.width / 2) + "," + Math.round(r.top + r.height / 2);
           }
           if (action === "fill" || action === "type") {
             const el = q(selector);
@@ -285,8 +361,16 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         }
       },
       args: [msg.action, msg.selector || "", msg.value || "", msg.code || "", CAP],
-    }).then((res) => sendResponse({ text: res && res[0] ? String(res[0].result) : "(no result)" }))
-      .catch((e) => sendResponse({ text: "act error: " + e }));
+    }).then((res) => {
+      const out = res && res[0] ? String(res[0].result) : "(no result)";
+      // #10 — mirror the action into the on-page HUD (border + log; ghost
+      // cursor when the click reported its coordinates).
+      let click = null;
+      const cm = out.match(/@(\d+),(\d+)$/);
+      if (msg.action === "click" && cm) click = { x: +cm[1], y: +cm[2] };
+      hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (msg.selector || (msg.code || "").slice(0, 60)) + " → " + out.slice(0, 90), click);
+      sendResponse({ text: out });
+    }).catch((e) => sendResponse({ text: "act error: " + e }));
   });
   return true; // async
 });
