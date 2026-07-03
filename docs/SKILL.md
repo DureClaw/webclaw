@@ -50,7 +50,7 @@ curl -sf -H "Authorization: Bearer $SECRET" http://localhost:4000/api/task-resul
 | `[FILL@site] <css> = <값>` | 입력 (input/change 이벤트 포함) | **실제 반영값** 반환 — 보낸 값과 다르면 WARNING 포함 |
 | `[SUBMIT@site] <css>` | 폼 제출 (또는 요소의 form.submit / click) | `submitted <css>` |
 | `[JS@site] <code>` | 페이지 컨텍스트 JS 실행. **Promise 반환 시 await됨** — `(async()=>{...})()` 사용 가능 | 결과 문자열/JSON |
-| `[DOWNLOAD] <url> [:: <하위경로/파일명>]` | 세션 포함 실제 다운로드. **완료까지 대기** 후 최종 경로+바이트 반환 (120초 초과 시 `in_progress (id=N)`) | `download complete (id=N) → 경로 (N bytes)` |
+| `[DOWNLOAD] <url> [:: <하위경로/파일명>]` | 세션 포함 실제 다운로드. **저장 대화상자 없이 즉시 저장**(saveAs:false, v0.4.5+), **완료까지 대기** 후 최종 경로+바이트 반환 (120초 초과 시 `in_progress (id=N)`) | `download complete (id=N) → 경로 (N bytes)` |
 | `[DOWNLOAD?] <id>` | 진행 중 다운로드 상태 재조회 | 상태+경로+바이트 |
 | `[CANCEL] <id\|all>` | 다운로드 취소 | 취소 결과 |
 | `[HUD@site] on\|off` | **시각 감독 레이어**(v0.4.0+): 작업 중 탭 형광 테두리 + [CLICK] 시 고스트 커서·리플 + 우측 작업 로그 패널(+입력창) | `hud on @ tab N` |
