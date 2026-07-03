@@ -71,6 +71,23 @@ async function pickTab(urlMatch) {
   return active || null;
 }
 
+// #4 — navigation-triggering actions race with tab state: if the target tab is
+// still loading (e.g. a previous CLICK/SUBMIT navigated it), wait for the new
+// document to finish before injecting, so follow-up DOM/JS reads see the real
+// page rather than a half-loaded one.
+function waitTabReady(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; chrome.tabs.onUpdated.removeListener(onUpd); resolve(); } };
+    const onUpd = (id, info) => { if (id === tabId && info.status === "complete") finish(); };
+    chrome.tabs.get(tabId, (t) => {
+      if (chrome.runtime.lastError || !t || t.status === "complete") return finish();
+      chrome.tabs.onUpdated.addListener(onUpd);
+      setTimeout(finish, timeoutMs);
+    });
+  });
+}
+
 // [TABS] — list open tabs so the master can see which one holds the logged-in
 // session and target it with @<url-substring>.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
@@ -84,11 +101,12 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   return true; // async
 });
 
-// [DOM] hands — read the target tab's DOM (raised cap).
+// [DOM] hands — read the target tab's DOM (raised cap, waits out navigation).
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "dom") return;
-  pickTab(msg.urlMatch).then((tab) => {
+  pickTab(msg.urlMatch).then(async (tab) => {
     if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
+    await waitTabReady(tab.id); // #4
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: (q, cap) => {
@@ -107,31 +125,82 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 });
 
 // [DOWNLOAD] <url> — trigger a real browser download (session cookies included,
-// saved to disk) — unlike page fetch() which only returns bytes to JS. Ideal for
-// bulk file/zip downloads (e.g. Moodle action=downloadall).
+// saved to disk). #2 — resolve on *completion*, not start: wait for the download
+// to finish (or fail) and report the final path/size, so the master never has to
+// poll the filesystem. Long downloads time out to "in_progress" and can be
+// re-queried with [DOWNLOAD?] <id>.
+const DL_WAIT_MS = 120000;
+
+function describeDownload(id) {
+  return new Promise((resolve) => {
+    chrome.downloads.search({ id }, (items) => {
+      const d = items && items[0];
+      if (!d) return resolve("download id=" + id + " not found");
+      resolve(
+        "download " + d.state + " (id=" + id + ") → " + (d.filename || d.url) +
+        (d.fileSize > 0 ? " (" + d.fileSize + " bytes)" : "") +
+        (d.error ? " error=" + d.error : "")
+      );
+    });
+  });
+}
+
+function waitDownloadDone(id, timeoutMs = DL_WAIT_MS) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (how) => {
+      if (done) return;
+      done = true;
+      chrome.downloads.onChanged.removeListener(onChg);
+      describeDownload(id).then((desc) => resolve(how === "timeout" ? desc.replace(/^download \w+/, "download in_progress") : desc));
+    };
+    const onChg = (delta) => {
+      if (delta.id !== id || !delta.state) return;
+      if (delta.state.current === "complete" || delta.state.current === "interrupted") finish("state");
+    };
+    chrome.downloads.onChanged.addListener(onChg);
+    // it may already be finished by the time we attach the listener
+    chrome.downloads.search({ id }, (items) => {
+      const d = items && items[0];
+      if (d && (d.state === "complete" || d.state === "interrupted")) finish("state");
+    });
+    setTimeout(() => finish("timeout"), timeoutMs);
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "download") return;
   try {
+    // [DOWNLOAD?] <id> — status re-query for a long-running download.
+    if (msg.statusOnly) {
+      describeDownload(Number(msg.url)).then((text) => sendResponse({ text }));
+      return true;
+    }
     const opts = { url: msg.url, conflictAction: "uniquify" };
     // Optional target sub-path under Downloads (sanitized) — keeps same-named
-    // files from different students apart.
+    // files from different sources apart.
     if (msg.path) opts.filename = String(msg.path).replace(/\.\.(\/|\\)/g, "").replace(/^[/\\]+/, "");
     chrome.downloads.download(opts, (id) => {
       if (chrome.runtime.lastError) sendResponse({ text: "download error: " + chrome.runtime.lastError.message });
-      else sendResponse({ text: "download started (id=" + id + ") → " + (opts.filename || msg.url) });
+      else waitDownloadDone(id).then((text) => sendResponse({ text })); // #2
     });
   } catch (e) { sendResponse({ text: "download error: " + e }); }
   return true; // async
 });
 
 // [CLICK]/[FILL]/[TYPE]/[SUBMIT]/[JS] — act on the target tab (real interaction).
+// #6 — the injected function is async and awaits thenable eval results, so [JS]
+// bodies can use `await` (via async IIFE) for wait-then-read workflows.
+// #3 — fill re-reads the value after dispatching events and reports the value
+// the page actually kept (framework handlers may transform or reject it).
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "act") return;
-  pickTab(msg.urlMatch).then((tab) => {
+  pickTab(msg.urlMatch).then(async (tab) => {
     if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
+    await waitTabReady(tab.id); // #4
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: (action, selector, value, code, cap) => {
+      func: async (action, selector, value, code, cap) => {
         const q = (s) => document.querySelector(s);
         try {
           if (action === "click") {
@@ -149,7 +218,11 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
             if (setter && setter.set) { setter.set.call(el, value); } else { el.value = value; }
             el.dispatchEvent(new Event("input", { bubbles: true }));
             el.dispatchEvent(new Event("change", { bubbles: true }));
-            return "filled " + selector + " = " + value;
+            // #3 read-back: report what the page actually kept, not what we sent.
+            const kept = el.value;
+            return kept === value
+              ? "filled " + selector + " = " + kept
+              : "filled " + selector + " = " + kept + " (WARNING: page kept a different value than sent: " + value + ")";
           }
           if (action === "submit") {
             const el = q(selector);
@@ -161,7 +234,8 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
           }
           if (action === "js") {
             // eslint-disable-next-line no-eval
-            const r = eval(code);
+            let r = eval(code);
+            if (r && typeof r.then === "function") r = await r; // #6 async support
             const s = typeof r === "object" ? JSON.stringify(r) : String(r);
             return s.slice(0, cap);
           }

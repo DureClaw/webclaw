@@ -25,6 +25,8 @@ async function start() {
       chrome.runtime.sendMessage(Object.assign({ type: "act" }, payload), (r) => resolve((r && r.text) || "(no result)"))),
     download: (url, path) => new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "download", url, path }, (r) => resolve((r && r.text) || "(no result)"))),
+    downloadStatus: (id) => new Promise((resolve) =>
+      chrome.runtime.sendMessage({ type: "download", url: id, statusOnly: true }, (r) => resolve((r && r.text) || "(no result)"))),
     onTask: (t) => {
       feed.unshift({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() });
       feed.splice(40);

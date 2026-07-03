@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.3.2",
+          preferred_model: "browser", version: "webclaw/0.3.3",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -51,6 +51,13 @@
       const from = p.from || "http@controller";
       log("task " + p.task_id + ": " + instr.slice(0, 70));
       hooks.onTask && hooks.onTask({ dir: "in", name: from, text: instr });
+      // #5 delivery ack — tell the controller the task was actually picked up,
+      // so an eternally-pending task can be distinguished from a working one.
+      // Sent as a separate "task.ack" event (NOT task.result) so buses that
+      // don't know it simply ignore it and the real result is never shadowed.
+      send([joinRef, nref(), "work:" + cfg.workKey, "task.ack", {
+        task_id: p.task_id, to: from, from: cfg.name, backend: "webclaw",
+      }]);
       let out, code = 0;
       try { out = await runTask(instr, cfg, hooks); } catch (e) { out = String(e); code = 1; }
       send([joinRef, nref(), "work:" + cfg.workKey, "task.result", {
@@ -69,7 +76,7 @@
   // The optional @<url-substring> picks a specific tab (e.g. the logged-in
   // session) instead of the active one.
   function parseMarker(t) {
-    const m = t.match(/^\[([A-Za-z]+)(?:@([^\]]+))?\]\s*([\s\S]*)$/);
+    const m = t.match(/^\[([A-Za-z]+\??)(?:@([^\]]+))?\]\s*([\s\S]*)$/);
     return m ? { name: m[1].toUpperCase(), urlMatch: (m[2] || "").trim(), rest: m[3] } : null;
   }
 
@@ -95,12 +102,16 @@
         return (await r.text()).slice(0, CAP);
       }
       // [DOWNLOAD] <url> [:: <relative/path.ext>] — real browser download to disk
-      // (session cookies incl.). Optional target path saves into a sub-folder of
-      // Downloads (e.g. per-student) so many same-named files don't collide.
+      // (session cookies incl.). Waits for completion and reports final path/size
+      // (long downloads return in_progress; re-query with [DOWNLOAD?] <id>).
+      // Optional target path saves into a sub-folder of Downloads so many
+      // same-named files don't collide.
       if (name === "DOWNLOAD" && hooks.download) {
         const parts = rest.split(" :: ");
         return await hooks.download(parts[0].trim(), (parts[1] || "").trim());
       }
+      // [DOWNLOAD?] <id> — status of a previously started download.
+      if (name === "DOWNLOAD?" && hooks.downloadStatus) return await hooks.downloadStatus(rest.trim());
       // [DOM] <query> — read the target tab's DOM (empty query = page text).
       if (name === "DOM" && hooks.dom) return await hooks.dom(rest.trim(), urlMatch);
       // [TABS] — list open tabs so the master can target the logged-in session.
