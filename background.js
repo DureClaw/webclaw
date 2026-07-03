@@ -83,8 +83,14 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 async function pickTab(urlMatch) {
   if (urlMatch) {
     const tabs = await chrome.tabs.query({});
-    const hit = tabs.find((t) => (t.url || "").includes(urlMatch));
-    if (hit) return hit;
+    // Skip discarded (memory-unloaded) tabs — scripting cannot reach them and
+    // fails with a misleading "must request permission" error. Prefer active,
+    // then most-recently-accessed, among the matches.
+    const hits = tabs.filter((t) => (t.url || "").includes(urlMatch) && !t.discarded);
+    if (hits.length) {
+      hits.sort((a, b) => (b.active - a.active) || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
+      return hits[0];
+    }
   }
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return active || null;
@@ -106,6 +112,20 @@ function waitTabReady(tabId, timeoutMs = 15000) {
     });
   });
 }
+
+// [OPEN] <url> — open a URL in a new foreground tab (loads with the user's
+// session), wait for it to finish, return title+URL. The natural way to *show*
+// a result to the human (e.g. a search) instead of scraping it.
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "open") return;
+  chrome.tabs.create({ url: msg.url, active: true }).then(async (tab) => {
+    await waitTabReady(tab.id, 20000);
+    const t = await chrome.tabs.get(tab.id);
+    hudNotify(tab.id, "[OPEN] " + msg.url.slice(0, 80));
+    sendResponse({ text: "opened (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || "") });
+  }).catch((e) => sendResponse({ text: "open error: " + e }));
+  return true; // async
+});
 
 // [TABS] — list open tabs so the master can see which one holds the logged-in
 // session and target it with @<url-substring>.

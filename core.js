@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.4.1",
+          preferred_model: "browser", version: "webclaw/0.4.2",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -154,6 +154,9 @@
       if (name === "HUD" && hooks.act) return await hooks.act({ action: "hud", code: rest.trim() || "on", urlMatch });
       // [SAY] <text> — master's chat reply rendered into the HUD panel.
       if (name === "SAY" && hooks.act) return await hooks.act({ action: "say", code: rest, urlMatch });
+      // [OPEN] <url> — open in a new foreground tab (user's session), wait for
+      // load, return title+URL. Shows results to the human directly.
+      if (name === "OPEN" && hooks.open) return await hooks.open(rest.trim());
     }
     // default → delegate LLM to the master brain (the master does the thinking).
     if (cfg.brainUrl) {

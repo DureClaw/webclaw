@@ -32,6 +32,8 @@ async function start() {
       chrome.runtime.sendMessage({ type: "download", url: id, cancel: true }, (r) => resolve((r && r.text) || "(no result)"))),
     domEx: (p) => new Promise((resolve) =>
       chrome.runtime.sendMessage(Object.assign({ type: "dom" }, p), (r) => resolve((r && r.text) || "(no result)"))),
+    open: (url) => new Promise((resolve) =>
+      chrome.runtime.sendMessage({ type: "open", url }, (r) => resolve((r && r.text) || "(no result)"))),
     onTask: (t) => pushFeed({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() }),
   });
 }
