@@ -493,9 +493,12 @@ function hudNotify(tabId, text, click, working, scope) {
 
 function hudInjected(text, click, off, working, hist, scope) {
       const ID = "__wc_hud";
+      const PW = 320; // docked chat width — reserves this much page gutter (aside-style)
       if (off) {
         const r = document.getElementById(ID); if (r) r.remove();
         const s = document.getElementById(ID + "_style"); if (s) s.remove();
+        // release the reserved gutter so the page reclaims full width
+        document.documentElement.style.removeProperty("margin-right");
         return "hud off";
       }
       if (!document.getElementById(ID + "_style")) {
@@ -515,10 +518,14 @@ function hudInjected(text, click, off, working, hist, scope) {
         frame.className = "f";
         // The glow border only shows *while an action is executing* (fades out
         // a few seconds after the last action) — a steady blink is noise.
-        frame.style.cssText = "position:fixed;inset:0;border:7px solid #00ffcc;border-radius:12px;animation:__wcGlow 1.4s ease-in-out infinite;pointer-events:none;opacity:0;transition:opacity .4s";
+        // Bounds the *content* region (stops at the docked panel), not the panel.
+        frame.style.cssText = "position:fixed;top:0;left:0;bottom:0;right:" + PW + "px;border:7px solid #00ffcc;animation:__wcGlow 1.4s ease-in-out infinite;pointer-events:none;opacity:0;transition:opacity .4s";
         const panel = document.createElement("div");
         panel.className = "p";
-        panel.style.cssText = "position:fixed;top:14px;right:14px;bottom:14px;width:280px;display:flex;flex-direction:column;background:rgba(10,12,24,.88);color:#c8ffee;font:11px/1.5 ui-monospace,monospace;border:1px solid #00ffcc;border-radius:10px;padding:10px;pointer-events:auto;backdrop-filter:blur(3px)";
+        // Docked to the right edge, full height — a reserved column (aside-style),
+        // NOT a floating card. The page is pushed left by PW (margin-right below),
+        // so the panel never covers page content.
+        panel.style.cssText = "position:fixed;top:0;right:0;bottom:0;width:" + PW + "px;display:flex;flex-direction:column;background:rgba(10,12,24,.94);color:#c8ffee;font:12px/1.5 ui-monospace,monospace;border-left:2px solid #00ffcc;padding:12px;pointer-events:auto;box-shadow:-4px 0 24px rgba(0,0,0,.45);box-sizing:border-box;z-index:2147483647";
         panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>💬 webclaw chat <span style='color:#8fa3b8;font-weight:400;font-size:10px'>— 이 탭의 대화</span></div><div class='lines' style='flex:1;overflow-y:auto'></div>";
         // #11 — two-way chat: the human can instruct the agent from the page.
         const input = document.createElement("input");
@@ -541,6 +548,10 @@ function hudInjected(text, click, off, working, hist, scope) {
         cur.textContent = "🖱️";
         root.append(frame, panel, cur);
         document.documentElement.appendChild(root);
+        // Reserve a gutter on the right so the docked panel doesn't overlap the
+        // page — the page content shrinks by PW instead of being covered.
+        document.documentElement.style.setProperty("transition", "margin-right .2s ease");
+        document.documentElement.style.setProperty("margin-right", PW + "px", "important");
       }
       if (working) {
         const frame = root.querySelector(".f");
