@@ -280,12 +280,39 @@ function waitTabReady(tabId, timeoutMs = 15000) {
   });
 }
 
+// Put a webclaw-opened tab into a Chrome tab group so the fleet's tabs are
+// visually clustered in the tab strip. Prefers the active task's group; else a
+// shared "webclaw" group in the same window (reused if it already exists).
+async function groupWebclawTab(tab) {
+  try {
+    const { tasks, activeId } = await wwGet();
+    const active = tasks.find((t) => t.id === activeId);
+    if (active && active.groupId != null) {
+      try { await chrome.tabs.group({ tabIds: [tab.id], groupId: active.groupId }); return active.groupId; } catch {}
+    }
+    let gid = null;
+    try {
+      const gs = await chrome.tabGroups.query({ title: "webclaw", windowId: tab.windowId });
+      if (gs[0]) gid = gs[0].id;
+    } catch {}
+    if (gid != null) {
+      await chrome.tabs.group({ tabIds: [tab.id], groupId: gid });
+    } else {
+      gid = await chrome.tabs.group({ tabIds: [tab.id] });
+      await chrome.tabGroups.update(gid, { title: "webclaw", color: "cyan" });
+    }
+    return gid;
+  } catch (e) { return null; }
+}
+
 // [OPEN] <url> — open a URL in a new foreground tab (loads with the user's
 // session), wait for it to finish, return title+URL. The natural way to *show*
-// a result to the human (e.g. a search) instead of scraping it.
+// a result to the human (e.g. a search) instead of scraping it. The new tab is
+// added to the fleet's tab group so opened tabs stay clustered.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "open") return;
   chrome.tabs.create({ url: msg.url, active: true }).then(async (tab) => {
+    await groupWebclawTab(tab);
     await waitTabReady(tab.id, 20000);
     const t = await chrome.tabs.get(tab.id);
     hudNotify(tab.id, "[OPEN] " + msg.url.slice(0, 80));
@@ -298,11 +325,27 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 // session and target it with @<url-substring>.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "tabs") return;
-  chrome.tabs.query({}).then((tabs) => {
-    const list = tabs
-      .map((t) => `${t.active ? "*" : " "} [${t.windowId}] ${t.title || ""} — ${t.url || ""}`)
-      .join("\n");
-    sendResponse({ text: list.slice(0, CAP) || "(no tabs)" });
+  chrome.tabs.query({}).then(async (tabs) => {
+    // Map groupId → title so the listing can cluster tabs by their group.
+    const gmap = {};
+    try { (await chrome.tabGroups.query({})).forEach((g) => { gmap[g.id] = g.title || ("group " + g.id); }); } catch {}
+    const NG = "__ungrouped";
+    const groups = {};
+    for (const t of tabs) {
+      const key = (t.groupId != null && t.groupId !== -1) ? gmap[t.groupId] || ("group " + t.groupId) : NG;
+      (groups[key] = groups[key] || []).push(t);
+    }
+    // Named groups first (webclaw's clusters), ungrouped last.
+    const keys = Object.keys(groups).filter((k) => k !== NG).sort();
+    if (groups[NG]) keys.push(NG);
+    const out = keys.map((k) => {
+      const head = k === NG ? "▸ (그룹 없음)" : "▸ [" + k + "]";
+      const lines = groups[k]
+        .map((t) => `   ${t.active ? "*" : " "} [w${t.windowId}] ${t.title || ""} — ${t.url || ""}`)
+        .join("\n");
+      return head + "\n" + lines;
+    }).join("\n");
+    sendResponse({ text: out.slice(0, CAP) || "(no tabs)" });
   });
   return true; // async
 });
