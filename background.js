@@ -661,6 +661,55 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       target: { tabId: tab.id },
       func: async (action, selector, value, code, cap) => {
         const q = (s) => document.querySelector(s);
+        // ── helpers (static function scope — CSP-safe, no eval) ──────────────
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) return false;
+          const st = getComputedStyle(el);
+          return st.visibility !== "hidden" && st.display !== "none";
+        };
+        // real pointer sequence at element center (ghost cursor). Returns "@x,y"
+        const ghostClick = (el) => {
+          el.scrollIntoView({ block: "center", inline: "center" });
+          const r = el.getBoundingClientRect();
+          const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+          const o = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+          for (const t of ["pointerover", "mouseover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+            try { el.dispatchEvent(t.startsWith("pointer") ? new PointerEvent(t, o) : new MouseEvent(t, o)); } catch (e) { el.dispatchEvent(new MouseEvent(t === "click" ? "click" : "mousedown", o)); }
+          }
+          return "@" + x + "," + y;
+        };
+        // find a clickable element by visible text / aria-label (exact→contains), dialog-first, deepest
+        const findByText = (label) => {
+          const sels = "button,[role=button],a,[role=option],[role=menuitem],[role=tab],[tabindex],summary,input[type=submit],input[type=button],label";
+          const scopes = [document.querySelector("[role=dialog]"), document.querySelector(".modal"), document].filter(Boolean);
+          for (const pass of [0, 1]) {
+            for (const scope of scopes) {
+              const hits = [...scope.querySelectorAll(sels)].filter(visible).filter((el) => {
+                const txt = (el.getAttribute("aria-label") || el.value || el.textContent || "").trim();
+                return pass === 0 ? txt === label : txt.includes(label);
+              });
+              const pick = hits.find((el) => !hits.some((o) => o !== el && el.contains(o))) || hits[0];
+              if (pick) return pick;
+            }
+          }
+          return null;
+        };
+        // structured low-noise snapshot for diffing
+        const snap = () => {
+          const root = document.querySelector("[role=dialog]") || document.body;
+          const out = { fields: [], buttons: [], errors: [], texts: [] };
+          for (const el of root.querySelectorAll("input,textarea,select")) if (visible(el)) out.fields.push((el.getAttribute("placeholder") || el.name || el.getAttribute("aria-label") || "field") + "=" + (el.value || ""));
+          for (const el of root.querySelectorAll("button,[role=button]")) if (visible(el)) { const t = (el.textContent || "").trim(); if (t) out.buttons.push(t.slice(0, 20)); }
+          for (const el of root.querySelectorAll("[role=alert],[aria-live],[class*=error],[class*=Error],[class*=invalid],[aria-invalid=true]")) if (visible(el)) { const t = (el.textContent || "").trim(); if (t) out.errors.push(t.slice(0, 60)); }
+          out.texts = (root.innerText || "").split("\n").map((s) => s.trim()).filter(Boolean);
+          return out;
+        };
+        const diffSnap = (a, b) => {
+          const sub = (x, y) => { const sy = new Set(y); return [...new Set(x)].filter((v) => !sy.has(v)); };
+          return { addedFields: sub(b.fields, a.fields), removedFields: sub(a.fields, b.fields), addedButtons: sub(b.buttons, a.buttons), removedButtons: sub(a.buttons, b.buttons), addedText: sub(b.texts, a.texts).slice(0, 25), removedText: sub(a.texts, b.texts).slice(0, 25), errors: [...new Set(b.errors)] };
+        };
         try {
           if (action === "click") {
             const el = q(selector);
@@ -668,6 +717,26 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
             const r = el.getBoundingClientRect();
             el.click();
             return "clicked " + selector + " @" + Math.round(r.left + r.width / 2) + "," + Math.round(r.top + r.height / 2);
+          }
+          if (action === "clicktext") {
+            const el = findByText(value);
+            if (!el) return "(no clickable text: " + value + ")";
+            return "clicked '" + value + "' <" + el.tagName.toLowerCase() + "> " + ghostClick(el);
+          }
+          if (action === "snap") {
+            const s = snap();
+            return "snap · fields:" + s.fields.length + " buttons:[" + s.buttons.join(",") + "] errors:[" + s.errors.join("|") + "]";
+          }
+          if (action === "diff") {
+            const before = snap();
+            const m = String(code || "").trim().match(/^(clicktext|click):([\s\S]+)$/);
+            if (m) {
+              const el = m[1] === "clicktext" ? findByText(m[2].trim()) : q(m[2].trim());
+              if (!el) return "(diff: target not found: " + code + ")";
+              m[1] === "clicktext" ? ghostClick(el) : el.click();
+            }
+            await new Promise((r) => setTimeout(r, 1300));
+            return JSON.stringify(diffSnap(before, snap()));
           }
           if (action === "fill" || action === "type") {
             const el = q(selector);
@@ -716,8 +785,8 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       // cursor when the click reported its coordinates).
       let click = null;
       const cm = out.match(/@(\d+),(\d+)$/);
-      if (msg.action === "click" && cm) click = { x: +cm[1], y: +cm[2] };
-      hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (msg.selector || (msg.code || "").slice(0, 60)) + " → " + out.slice(0, 90), click, true); // working
+      if ((msg.action === "click" || msg.action === "clicktext") && cm) click = { x: +cm[1], y: +cm[2] };
+      hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (msg.selector || msg.value || (msg.code || "").slice(0, 60)) + " → " + out.slice(0, 90), click, true); // working
       sendResponse({ text: out });
     }).catch((e) => sendResponse({ text: "act error: " + e }));
   });

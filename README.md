@@ -23,6 +23,8 @@ DureClaw bus ──task.assign──▶ webclaw (offscreen WS) ──▶ task.re
    • [FETCH] <url>            → extension fetch (CORS-free)
    • [DOM] <css>              → read a tab's DOM / page text
    • [CLICK] <css>            → click an element
+- `[CLICKTEXT] <라벨>` — 보이는 텍스트/aria-label로 클릭(CSS 없이, 고스트 커서). React/모달 버튼용.
+- `[SNAP]` / `[DIFF] clicktext:<라벨>|click:<sel>` — 액션 전후 DOM 스냅샷 비교(추가 필드/버튼/에러/텍스트) — 스크린샷 없이 상태 판정.
    • [FILL] <css> = <value>   → set an input's value (+ input/change events)
    • [SUBMIT] <css>           → submit a form
    • [JS] <code>              → run JS in the page, return the result

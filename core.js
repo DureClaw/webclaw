@@ -143,6 +143,11 @@
       if (name === "TABS" && hooks.tabs) return await hooks.tabs();
       // [CLICK] <selector>
       if (name === "CLICK" && hooks.act) return await hooks.act({ action: "click", selector: rest.trim(), urlMatch });
+      // [CLICKTEXT] <label> — click by visible text / aria-label (no CSS). For React/headless-ui modals.
+      if (name === "CLICKTEXT" && hooks.act) return await hooks.act({ action: "clicktext", value: rest.trim(), urlMatch });
+      // [SNAP] — structured DOM snapshot (baseline). [DIFF] <action…> — run action, return only what changed.
+      if (name === "SNAP" && hooks.act) return await hooks.act({ action: "snap", urlMatch });
+      if (name === "DIFF" && hooks.act) return await hooks.act({ action: "diff", code: rest, urlMatch });
       // [FILL]/[TYPE] <selector> = <value>   (or selector\nvalue)
       if ((name === "FILL" || name === "TYPE") && hooks.act) {
         const { selector, value } = splitSelVal(rest);
