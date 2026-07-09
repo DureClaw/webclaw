@@ -25,6 +25,8 @@ async function start() {
       chrome.runtime.sendMessage({ type: "tabs" }, (r) => resolve((r && r.text) || "(no tabs)"))),
     act: (payload) => new Promise((resolve) =>
       chrome.runtime.sendMessage(Object.assign({ type: "act" }, payload), (r) => resolve((r && r.text) || "(no result)"))),
+    fetch: (url) => new Promise((resolve) =>
+      chrome.runtime.sendMessage({ type: "fetch", url }, (r) => resolve((r && r.text) || "(no result)"))),
     download: (url, path) => new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "download", url, path }, (r) => resolve((r && r.text) || "(no result)"))),
     downloadStatus: (id) => new Promise((resolve) =>

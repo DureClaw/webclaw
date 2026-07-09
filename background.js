@@ -4,18 +4,21 @@
 const CAP = 2000000; // raised for large grading pages (2MB)
                     // task.result frame is fine (screenshots already send ~262KB).
 
-async function ensureOffscreen() {
+async function ensureOffscreen(force = false) {
   const has = await chrome.offscreen.hasDocument();
-  if (has) return;
+  if (has) {
+    if (!force) return;
+    await chrome.offscreen.closeDocument();
+  }
   await chrome.offscreen.createDocument({
-    url: "offscreen.html",
+    url: "offscreen.html?v=0.6.1",
     reasons: ["BLOBS"],
     justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
   });
 }
 ensureOffscreen(); // run on SW load
-chrome.runtime.onInstalled.addListener(ensureOffscreen);
-chrome.runtime.onStartup.addListener(ensureOffscreen);
+chrome.runtime.onInstalled.addListener(() => ensureOffscreen(true));
+chrome.runtime.onStartup.addListener(() => ensureOffscreen(true));
 
 // Wide Worker side panel: clicking the toolbar icon opens the native aside; it
 // also stays available on every tab.
@@ -385,6 +388,15 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       sendResponse({ text: out });
     }).catch((e) => sendResponse({ text: "scripting error: " + e }));
   });
+  return true; // async
+});
+
+// [FETCH] — extension fetch bypasses page CORS via host_permissions.
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "fetch") return;
+  fetch(msg.url)
+    .then(async (r) => sendResponse({ text: await r.text() }))
+    .catch((e) => sendResponse({ text: "fetch error: " + e }));
   return true; // async
 });
 

@@ -26,9 +26,16 @@
   .row input{flex:1;padding:11px 13px;border-radius:11px;border:1px solid rgba(0,255,204,.3);background:rgba(0,0,0,.4);color:#eaf6ff;outline:none;font-size:13px}
   .row input:focus{border-color:var(--cyan)}
   .row button{border:0;border-radius:11px;padding:0 16px;font-weight:700;cursor:pointer;background:linear-gradient(90deg,var(--cyan),#38bdf8);color:#04121a}
+  .mode-aside{display:flex;gap:1px;padding:4px;background:#0a0c18;border-bottom:1px solid rgba(0,255,204,.12)}
+  .mode-btn{flex:1;border:1px solid rgba(0,255,204,.2);background:transparent;color:#8fa9bd;padding:7px 4px;font-size:11px;cursor:pointer;border-radius:6px}
+  .mode-btn.active{background:rgba(0,255,204,.16);color:#eafff9;font-weight:700;border-color:var(--cyan)}
 </style></head><body>
-  <div class="top"><span class="b">◇ <span>Wide Worker</span></span>
+  <div class="top"><span class="b">◇ <span id="brandText">Wide Worker</span></span>
     <span class="st"><span class="dot" id="dot"></span><span id="stat">…</span></span></div>
+  <div class="mode-aside">
+    <button id="modeBus" class="mode-btn">Bus (버스)</button>
+    <button id="modeWorker" class="mode-btn active">Wide Worker (단독)</button>
+  </div>
   <div class="tasks" id="tasks"><span class="add" id="add">＋ 새 작업</span></div>
   <div class="log" id="log"></div>
   <div class="row"><input id="in" placeholder="지시를 입력하세요…" autofocus><button id="send">↵</button></div>

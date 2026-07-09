@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.4.7",
+          preferred_model: "browser", version: "webclaw/0.6.1",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -113,9 +113,8 @@
     if (mk) {
       const { name, urlMatch, rest } = mk;
       // [FETCH] <url> — extension fetch bypasses page CORS (host_permissions).
-      if (name === "FETCH") {
-        const r = await fetch(rest.trim());
-        return (await r.text()).slice(0, CAP);
+      if (name === "FETCH" && hooks.fetch) {
+        return (await hooks.fetch(rest.trim())).slice(0, CAP);
       }
       // [DOWNLOAD] <url> [:: <relative/path.ext>] — real browser download to disk
       // (session cookies incl.). Waits for completion and reports final path/size

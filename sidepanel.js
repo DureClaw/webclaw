@@ -6,6 +6,13 @@ const B = (msg) => new Promise((r) => { try { chrome.runtime.sendMessage(msg, r)
 const $ = (id) => document.getElementById(id);
 let state = { tasks: [], activeId: null };
 
+function isWorker(cfg) { return !!(cfg && cfg.brainUrl); }
+function setModeUI(worker) {
+  $("modeBus").classList.toggle("active", !worker);
+  $("modeWorker").classList.toggle("active", worker);
+  $("brandText").textContent = worker ? "Wide Worker" : "Bus Node";
+}
+
 function render() {
   const t = $("tasks");
   [...t.querySelectorAll(".task")].forEach((e) => e.remove());
@@ -31,10 +38,22 @@ function render() {
 async function load() { const s = await B({ type: "wwState" }); if (s) { state = s; render(); } }
 
 async function health() {
+  const { cfg, status, activeCfg } = await chrome.storage.local.get(["cfg", "status", "activeCfg"]);
+  const worker = isWorker(cfg);
+  setModeUI(worker);
+  if (!worker) {
+    // Bus mode: show offscreen bus connection status
+    const on = status === "connected";
+    $("dot").className = "dot " + (on ? "on" : "off");
+    $("stat").textContent = on
+      ? ("버스 연결 · " + (activeCfg && activeCfg.name ? activeCfg.name : cfg.name || "?"))
+      : (status === "disconnected" ? "버스 끊김" : "버스 대기중");
+    return;
+  }
+  // Wide Worker mode: brain health
   try {
-    const { cfg } = await chrome.storage.local.get("cfg");
-    const base = (cfg && cfg.brainUrl) || "http://localhost:4111";
-    const j = await (await fetch(base.replace(/\/$/, "") + "/health")).json();
+    const base = String(cfg.brainUrl || "http://localhost:4111").replace(/\/$/, "");
+    const j = await (await fetch(base + "/health")).json();
     const b = j.backends || {}; const on = (j.chain || []).filter((k) => b[k + "-cli"] || b[k + "-api"]);
     $("dot").className = "dot " + (on.length ? "on" : "off");
     $("stat").textContent = on.length ? on.join(" › ") : "두뇌 미연결";
@@ -52,4 +71,23 @@ async function send() {
 $("send").onclick = send;
 $("in").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 chrome.runtime.onMessage.addListener((m) => { if (m && m.type === "wwUpdated") load(); });
+
+async function switchMode(worker) {
+  const { cfg = {} } = await chrome.storage.local.get("cfg");
+  if (worker) {
+    // To Wide Worker: keep current cfg, user fills brainUrl and connects
+    if (!cfg.brainUrl) cfg.brainUrl = "http://localhost:4111";
+  } else {
+    // To Bus: remove brain fields, restart offscreen
+    delete cfg.brainUrl;
+    delete cfg.brainToken;
+  }
+  await chrome.storage.local.set({ cfg });
+  setModeUI(worker);
+  chrome.runtime.sendMessage({ type: "connect" }, () => {});
+  health();
+}
+$("modeBus").onclick = () => switchMode(false);
+$("modeWorker").onclick = () => switchMode(true);
+
 load(); health(); setInterval(health, 5000);
