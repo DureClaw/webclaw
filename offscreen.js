@@ -23,8 +23,15 @@ async function start() {
       chrome.runtime.sendMessage({ type: "dom", query, urlMatch }, (r) => resolve((r && r.text) || "(no dom)"))),
     tabs: () => new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "tabs" }, (r) => resolve((r && r.text) || "(no tabs)"))),
-    act: (payload) => new Promise((resolve) =>
-      chrome.runtime.sendMessage(Object.assign({ type: "act" }, payload), (r) => resolve((r && r.text) || "(no result)"))),
+    // #14 — background.js flags well-known failures (unmatched selector,
+    // value mismatch) with { failed:true, reason }. Reject instead of
+    // resolving so core.js's handle() elevates them to status:"failed" +
+    // exit_code 1, carrying `reason` through on the Error object.
+    act: (payload) => new Promise((resolve, reject) =>
+      chrome.runtime.sendMessage(Object.assign({ type: "act" }, payload), (r) => {
+        if (r && r.failed) reject(Object.assign(new Error((r && r.text) || "act failed"), { reason: r.reason }));
+        else resolve((r && r.text) || "(no result)");
+      })),
     fetch: (url) => new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "fetch", url }, (r) => resolve((r && r.text) || "(no result)"))),
     download: (url, path) => new Promise((resolve) =>

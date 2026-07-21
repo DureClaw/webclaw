@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent"],
-          preferred_model: "browser", version: "webclaw/0.6.1",
+          preferred_model: "browser", version: "webclaw/0.6.4",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -61,13 +61,20 @@
       send([joinRef, nref(), "work:" + cfg.workKey, "task.ack", {
         task_id: p.task_id, to: from, from: cfg.name, backend: "webclaw",
       }]);
-      let out, code = 0;
-      try { out = await runTask(instr, cfg, hooks); } catch (e) { out = String(e); code = 1; }
-      send([joinRef, nref(), "work:" + cfg.workKey, "task.result", {
+      // #14 — hooks.act rejects (instead of resolving) known-bad outcomes
+      // (unmatched selector, value mismatch) with an Error carrying a
+      // `.reason` code, so those land here as real failures — status:"failed"
+      // + exit_code 1 — instead of a success response the master has to
+      // string-sniff for "(no match:" to tell apart from a real success.
+      let out, code = 0, reason = null;
+      try { out = await runTask(instr, cfg, hooks); } catch (e) { out = String(e); code = 1; reason = e && e.reason; }
+      const result = {
         task_id: p.task_id, to: from, from: cfg.name,
         status: code ? "failed" : "done", output: String(out).slice(0, CAP),
         exit_code: code, backend: "webclaw",
-      }]);
+      };
+      if (reason) result.reason = reason;
+      send([joinRef, nref(), "work:" + cfg.workKey, "task.result", result]);
       hooks.onTask && hooks.onTask({ dir: "out", name: cfg.name, text: String(out).slice(0, 120) });
     }
 
@@ -145,8 +152,15 @@
       // [CLICKTEXT] <label> — click by visible text / aria-label (no CSS). For React/headless-ui modals.
       if (name === "CLICKTEXT" && hooks.act) return await hooks.act({ action: "clicktext", value: rest.trim(), urlMatch });
       // [SNAP] — structured DOM snapshot (baseline). [DIFF] <action…> — run action, return only what changed.
+      // Optional trailing " :: screenshot" (issue #16) also attaches a visual
+      // capture alongside the structured diff — useful when the diff alone
+      // can't tell layout breakage / hidden fields / custom-widget rendering.
       if (name === "SNAP" && hooks.act) return await hooks.act({ action: "snap", urlMatch });
-      if (name === "DIFF" && hooks.act) return await hooks.act({ action: "diff", code: rest, urlMatch });
+      if (name === "DIFF" && hooks.act) {
+        const withShot = / :: screenshot\s*$/i.test(rest);
+        const code = withShot ? rest.replace(/ :: screenshot\s*$/i, "") : rest;
+        return await hooks.act({ action: "diff", code, urlMatch, shot: withShot });
+      }
       // [FILL]/[TYPE] <selector> = <value>   (or selector\nvalue)
       if ((name === "FILL" || name === "TYPE") && hooks.act) {
         const { selector, value } = splitSelVal(rest);
@@ -164,6 +178,17 @@
       // [OPEN] <url> — open in a new foreground tab (user's session), wait for
       // load, return title+URL. Shows results to the human directly.
       if (name === "OPEN" && hooks.open) return await hooks.open(rest.trim());
+      // [CLOSE] — close the target tab (cleanup after batch [OPEN]/[DOM] work).
+      // Routed through hooks.act (like HUD/SAY) since background.js owns tabs.
+      if (name === "CLOSE" && hooks.act) return await hooks.act({ action: "close", urlMatch });
+      // [SHOT]/[SCREENSHOT] [<relative/path.jpg>] — screenshot the target tab's
+      // visible viewport, saved to disk via the same download queue as
+      // [DOWNLOAD]. [SCREENSHOT] is the long form tracked in the README
+      // roadmap and issue #16; [SHOT] is a short alias for the same action.
+      // No "::" separator (unlike DOWNLOAD) — there's no URL argument here,
+      // just the optional path, taken as the whole rest of the instruction.
+      // Defaults to a timestamped name under webclaw-shots/ if no path given.
+      if ((name === "SHOT" || name === "SCREENSHOT") && hooks.act) return await hooks.act({ action: "shot", code: rest.trim(), urlMatch });
     }
     // default → delegate LLM to the master brain (the master does the thinking).
     if (cfg.brainUrl) {

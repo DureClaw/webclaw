@@ -4,21 +4,35 @@
 const CAP = 2000000; // raised for large grading pages (2MB)
                     // task.result frame is fine (screenshots already send ~262KB).
 
-async function ensureOffscreen(force = false) {
-  const has = await chrome.offscreen.hasDocument();
-  if (has) {
-    if (!force) return;
-    await chrome.offscreen.closeDocument();
-  }
-  await chrome.offscreen.createDocument({
-    url: "offscreen.html?v=0.6.1",
-    reasons: ["BLOBS"],
-    justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
+// SW startup can fire ensureOffscreen() from up to three places at once
+// (the top-level call below, onInstalled, onStartup). Racing hasDocument()/
+// createDocument() calls make Chrome tear down one document mid-load, which
+// surfaces as an uncaught "Offscreen document closed before fully loading."
+// Serialize every call through one chain so only one create/close is ever
+// in flight, and swallow the benign race error if it still slips through.
+let offscreenChain = Promise.resolve();
+function ensureOffscreen(force = false) {
+  offscreenChain = offscreenChain.then(async () => {
+    const has = await chrome.offscreen.hasDocument();
+    if (has) {
+      if (!force) return;
+      await chrome.offscreen.closeDocument();
+    }
+    try {
+      await chrome.offscreen.createDocument({
+        url: "offscreen.html?v=0.6.4",
+        reasons: ["BLOBS"],
+        justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
+      });
+    } catch (e) {
+      if (!/closed before fully loading|single offscreen document/i.test(String(e))) throw e;
+    }
   });
+  return offscreenChain;
 }
-ensureOffscreen(); // run on SW load
-chrome.runtime.onInstalled.addListener(() => ensureOffscreen(true));
-chrome.runtime.onStartup.addListener(() => ensureOffscreen(true));
+ensureOffscreen().catch((e) => console.warn("ensureOffscreen failed", e)); // run on SW load
+chrome.runtime.onInstalled.addListener(() => ensureOffscreen(true).catch((e) => console.warn("ensureOffscreen failed", e)));
+chrome.runtime.onStartup.addListener(() => ensureOffscreen(true).catch((e) => console.warn("ensureOffscreen failed", e)));
 
 // Wide Worker side panel: clicking the toolbar icon opens the native aside; it
 // also stays available on every tab.
@@ -136,7 +150,8 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (msg && msg.type === "connect") {
     ensureOffscreen()
       .then(() => chrome.runtime.sendMessage({ type: "restart" }).catch(() => {}))
-      .then(() => sendResponse({ ok: true }));
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => { console.warn("ensureOffscreen failed", e); sendResponse({ ok: false }); });
     return true;
   }
 });
@@ -446,8 +461,34 @@ function waitDownloadDone(id, timeoutMs = DL_WAIT_MS) {
 
 // #7 — serialize downloads: browsers block bursts of automated downloads from
 // one site, and parallel dispatch causes duplicates on blind retry. Chain every
-// [DOWNLOAD] through a single promise queue (concurrency 1).
+// [DOWNLOAD]/[SHOT] through a single promise queue (concurrency 1).
 let dlChain = Promise.resolve();
+
+// Shared by [DOWNLOAD] and [SHOT] — one queue so bursts from either marker
+// never collide or trigger the browser's duplicate-download blocking. `url`
+// is a real page URL for DOWNLOAD, or a data: URL (captured screenshot) for
+// SHOT — chrome.downloads.download accepts both identically.
+function queueDownload(url, path) {
+  // saveAs:false suppresses the per-file "Save as" dialog even when the
+  // browser is configured to ask for a location — automated downloads land
+  // directly in Downloads/ (or the given sub-path) with no human click.
+  const opts = { url, conflictAction: "uniquify", saveAs: false };
+  // Optional target sub-path under Downloads (sanitized) — keeps same-named
+  // files from different sources apart.
+  if (path) opts.filename = String(path).replace(/\.\.(\/|\\)/g, "").replace(/^[/\\]+/, "");
+  return new Promise((resolveOuter) => {
+    dlChain = dlChain.then(() => new Promise((resolveQueue) => {
+      chrome.downloads.download(opts, (id) => {
+        if (chrome.runtime.lastError) {
+          resolveOuter("download error: " + chrome.runtime.lastError.message);
+          resolveQueue();
+        } else {
+          waitDownloadDone(id).then((text) => { resolveOuter(text); resolveQueue(); }); // #2
+        }
+      });
+    })).catch(() => resolveOuter("download error: queue failure"));
+  });
+}
 
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "download") return;
@@ -473,26 +514,13 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       }
       return true;
     }
-    // saveAs:false suppresses the per-file "Save as" dialog even when the
-    // browser is configured to ask for a location — automated downloads land
-    // directly in Downloads/ (or the given sub-path) with no human click.
-    const opts = { url: msg.url, conflictAction: "uniquify", saveAs: false };
-    // Optional target sub-path under Downloads (sanitized) — keeps same-named
-    // files from different sources apart.
-    if (msg.path) opts.filename = String(msg.path).replace(/\.\.(\/|\\)/g, "").replace(/^[/\\]+/, "");
-    dlChain = dlChain.then(() => new Promise((resolveQueue) => {
-      chrome.downloads.download(opts, (id) => {
-        if (chrome.runtime.lastError) { sendResponse({ text: "download error: " + chrome.runtime.lastError.message }); resolveQueue(); }
-        else waitDownloadDone(id).then(async (text) => {
-          // Downloads are tab-independent → mirror into the conversation tab
-          // with a [전체] (global) badge instead of every tab's panel.
-          const { lastChatTabId } = await chrome.storage.local.get("lastChatTabId");
-          if (lastChatTabId) hudNotify(lastChatTabId, "⬇️ " + text.slice(0, 140), null, true, "global");
-          sendResponse({ text });
-          resolveQueue();
-        }); // #2
-      });
-    })).catch(() => {});
+    queueDownload(msg.url, msg.path).then(async (text) => {
+      // Downloads are tab-independent → mirror into the conversation tab
+      // with a [전체] (global) badge instead of every tab's panel.
+      const { lastChatTabId } = await chrome.storage.local.get("lastChatTabId");
+      if (lastChatTabId) hudNotify(lastChatTabId, "⬇️ " + text.slice(0, 140), null, true, "global");
+      sendResponse({ text });
+    });
   } catch (e) { sendResponse({ text: "download error: " + e }); }
   return true; // async
 });
@@ -663,6 +691,39 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         .then(() => sendResponse({ text: "hud " + (on ? "on" : "off") + " @ tab " + tab.id }));
       return;
     }
+    // [CLOSE] — close the target tab (cleanup after batch [OPEN]/[DOM] runs so
+    // hundreds of scripted tabs don't pile up in the user's browser). Native
+    // chrome.tabs.remove, not page-script window.close() — CSP on the target
+    // page would otherwise block it and self-close is unreliable for
+    // extension-opened tabs regardless.
+    if (msg.action === "close") {
+      chrome.tabs.remove(tab.id)
+        .then(() => sendResponse({ text: "closed tab " + tab.id }))
+        .catch((e) => sendResponse({ text: "close error: " + e }));
+      return;
+    }
+    // [SHOT] [<relative/path.jpg>] — screenshot the target tab's visible
+    // viewport, saved to disk through the same queue as [DOWNLOAD]. A data:
+    // URL feeds chrome.downloads.download fine in an MV3 service worker —
+    // URL.createObjectURL, tried first, does NOT exist there (confirmed
+    // live: "createObjectURL is not a function"), so this stays data:.
+    // captureVisibleTab only works on the ACTIVE tab of its window, so focus
+    // the target tab first and give it a beat to repaint before capturing.
+    if (msg.action === "shot") {
+      chrome.tabs.update(tab.id, { active: true })
+        .then(() => new Promise((r) => setTimeout(r, 300)))
+        .then(() => chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 }))
+        .then((dataUrl) => {
+          const path = (msg.code || "").trim() || ("webclaw-shots/shot-" + Date.now() + ".jpg");
+          return queueDownload(dataUrl, path);
+        })
+        .then((text) => {
+          hudNotify(tab.id, "📸 " + text.slice(0, 140), null, true);
+          sendResponse({ text });
+        })
+        .catch((e) => sendResponse({ text: "shot error: " + e }));
+      return;
+    }
     // [SAY] <text> — master's reply rendered into the HUD chat panel. (#11)
     if (msg.action === "say") {
       hudNotify(tab.id, "🤖 master: " + String(msg.code || ""))
@@ -791,15 +852,36 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         }
       },
       args: [msg.action, msg.selector || "", msg.value || "", msg.code || "", CAP],
-    }).then((res) => {
-      const out = res && res[0] ? String(res[0].result) : "(no result)";
+    }).then(async (res) => {
+      let out = res && res[0] ? String(res[0].result) : "(no result)";
+      // #16 — [DIFF] ... :: screenshot — attach a visual capture alongside the
+      // structured DOM diff, for cases the diff alone can't judge (layout
+      // breakage, hidden fields, custom-widget rendering).
+      if (msg.action === "diff" && msg.shot) {
+        try {
+          await chrome.tabs.update(tab.id, { active: true });
+          await new Promise((r) => setTimeout(r, 200));
+          const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
+          const shotText = await queueDownload(dataUrl, "webclaw-shots/diff-" + Date.now() + ".jpg");
+          const j = JSON.parse(out);
+          j.screenshot = shotText;
+          out = JSON.stringify(j);
+        } catch (e) { /* diff still returns without a screenshot */ }
+      }
+      // #14 — classify the well-known failure shapes the page script returns
+      // as plain success-looking strings (unmatched selector, value mismatch)
+      // so runTask can elevate them to status:"failed" instead of the master
+      // having to string-sniff "(no match:" out of a "done" response.
+      let reason = null;
+      if (/^\(no match: |^\(no clickable text: |^\(diff: target not found: /.test(out)) reason = "no_match";
+      else if (msg.action === "fill" && /WARNING: page kept a different value than sent:/.test(out)) reason = "value_mismatch";
       // #10 — mirror the action into the on-page HUD (border + log; ghost
       // cursor when the click reported its coordinates).
       let click = null;
       const cm = out.match(/@(\d+),(\d+)$/);
       if ((msg.action === "click" || msg.action === "clicktext") && cm) click = { x: +cm[1], y: +cm[2] };
       hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (msg.selector || msg.value || (msg.code || "").slice(0, 60)) + " → " + out.slice(0, 90), click, true); // working
-      sendResponse({ text: out });
+      sendResponse(reason ? { text: out, failed: true, reason } : { text: out });
     }).catch((e) => sendResponse({ text: "act error: " + e }));
   });
   return true; // async
