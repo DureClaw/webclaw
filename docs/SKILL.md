@@ -1,6 +1,6 @@
 ---
 name: webclaw
-description: DureClaw 플릿의 브라우저 노드(webclaw Chrome 확장, v0.4.6+)에 마커 태스크를 디스패치해 로그인된 브라우저 세션으로 웹 작업(읽기·클릭·폼 입력·JS·다운로드·탭 열기)을 수행하고, 페이지 위 HUD 채팅으로 사용자와 양방향 대화하며 작업한다. 사용자가 "webclaw로", "브라우저 노드로", "HUD 채팅", "플릿으로 웹 작업" 등을 요청할 때 사용. Trigger: /webclaw
+description: DureClaw 플릿의 브라우저 노드(webclaw Chrome 확장, v0.7.0+)에 마커 태스크를 디스패치해 로그인된 브라우저 세션으로 웹 작업(읽기·클릭·폼 입력·JS·다운로드·탭 열기·CDP 네이티브 조작·@ref 아웃라인·[RUN] 스크립트·에이전트 Space)을 수행하고, 페이지 위 HUD 채팅으로 사용자와 양방향 대화하며 작업한다. 사용자가 "webclaw로", "브라우저 노드로", "HUD 채팅", "플릿으로 웹 작업" 등을 요청할 때 사용. Trigger: /webclaw
 ---
 
 # webclaw — DureClaw 브라우저 노드 조작 스킬
@@ -18,13 +18,11 @@ webclaw는 Chrome 확장 형태의 DureClaw 플릿 노드다. **사용자의 로
 ## 0. 연결 확인 (항상 먼저)
 
 ```bash
-# 시크릿은 파일 캐시 사용 — ps 추출은 간헐적으로 실패해 401을 만든다
-CACHE=<scratchpad>/.bus_secret
-[ -s "$CACHE" ] || ps aux | grep 'phx.server' | grep -o 'OAH_SECRET=[^ ]*' | head -1 | cut -d= -f2 > "$CACHE"
-SECRET=$(cat "$CACHE")
+# 버스 0.4.0+: 시크릿은 서버 데이터 디렉터리 파일에 있다
+SECRET=$(cat ~/.oah-server/data/server.secret)
 curl -sf http://localhost:4000/api/health          # {"ok":true,...}
 curl -sf -H "Authorization: Bearer $SECRET" http://localhost:4000/api/presence
-# 401이면 캐시 삭제 후 재추출
+# 401이면 클라이언트 secret과 server.secret 비교
 ```
 
 - presence에서 `webclaw@chrome-XXXX` 노드의 **정확한 이름·버전·work_key** 확인. 없으면 사용자에게 확장 연결 요청.
@@ -42,11 +40,13 @@ curl -sf -X POST -H "Authorization: Bearer $SECRET" -H "Content-Type: applicatio
 curl -sf -H "Authorization: Bearer $SECRET" http://localhost:4000/api/task-result/<ID>
 ```
 
+- **접속 확인 빠른 길**: `curl -s http://localhost:4000/api/health`(생존) → `node ~/dev/webclaw/test/presence.cjs`(붙은 노드 목록, REST presence가 비어도 정확) → `[RUN] return 'pong';` 왕복. 버스 0.4.0+ secret은 `~/.oah-server/data/server.secret`, 같은 맥에서는 secret 없이도 REST 가능(`OAH_TRUST_LOOPBACK=1`).
+- **구버전 버스 주의**: 2026-03 빌드(0.3.0)는 요청한 `task_id`를 무시하고 자체 `http-<ms>` id를 응답하며 `/api/task-result`가 없다(404). 항상 **POST 응답의 `task_id`로 `GET /api/task/<id>`** 폴링(200=완료, 202=대기) — 모든 버전에서 동작. `/api/presence`도 구버전은 빈 목록을 줄 수 있으니 노드 확인은 WS join 응답의 presences로.
 - `work_key`는 노드가 join한 키와 **정확히 일치**(presence 확인). 불일치 시 `queued` 응답 후 영원히 pending (#5).
 - 결과 JSON에 대형 텍스트가 담기면 **invalid escape로 파싱이 깨질 수 있음** — `json.loads(..., strict=False)` + try/except, 실패 시 셀렉터를 좁혀 재요청.
 - v0.3.3+는 수신 즉시 `task.ack` 이벤트 발신(버스 지원 시 delivered 판별).
 
-## 2. 마커 레퍼런스 (v0.4.6)
+## 2. 마커 레퍼런스 (v0.4.6 기본 + v0.7.0 추가)
 
 `[NAME]` 또는 `[NAME@<url부분문자열>]`. `@조각`은 그 문자열이 URL에 포함된 탭을 타깃(discarded 탭 자동 스킵, 활성·최근 우선 — v0.4.2+). 생략 시 활성 탭.
 
@@ -70,6 +70,28 @@ curl -sf -H "Authorization: Bearer $SECRET" http://localhost:4000/api/task-resul
 
 - `[FILL]` 값에 ` = `가 포함되면 개행 구분 문법: `[FILL] <css>\n<값>`.
 - 마커 없는 instructions는 브레인(LLM)으로 위임 — 이 스킬에선 마커만 쓴다.
+
+### v0.7.0 추가 마커 — 네이티브(CDP)·@ref·스크립트·Space·학습
+
+CDP(`chrome.debugger`)는 **업그레이드일 뿐 필수 아님** — 안 되면 기존 경로로 자동 폴백. 붙어 있는 동안 탭 상단에 "디버깅 중" 바가 뜨고 30초 유휴 후 자동 해제. 사용자가 그 바를 취소하면 그 탭은 10분간 CDP 안 씀.
+
+| 마커 | 기능 | 응답 |
+|---|---|---|
+| `[OUTLINE@site] [max]` (`[SNAPSHOT]`) | 모든 프레임(교차 출처 iframe·shadow DOM 포함)의 상호작용 요소를 `@N` ref로 | `@12 button "로그인"` 줄들 |
+| `[CLICK@site] <css\|@N>` | CDP 실제 마우스 클릭(isTrusted). 오버레이에 가리면 스크립트 클릭으로 폴백 | `clicked … (trusted) @x,y` |
+| `[TYPE@site] <css\|@N>\n<텍스트>` | CDP 실제 텍스트 입력 + 재읽기 (React 입력창용). `[FILL]`은 기존 setter 방식 | `typed … = 값 (trusted)` |
+| `[UPLOAD@site] <css\|@N> :: <절대경로>[, …]` | 파일 input에 로컬 파일 지정 (CDP 전용) | `uploaded …` |
+| `[WAIT@site] <css\|@N\|text:문구> [:: ms]` | 나타나고 보일 때까지 대기(기본 10초) | `found … after Nms` / `timeout` |
+| `[CDP@site] Domain.method {json}` | 원시 CDP. 쿠키 덤프·`Browser.*`·`Target.*` 등은 거부(`cdp_denied`) | 결과 JSON |
+| `[RUN@site] <js>` | **여러 단계를 한 번에** — async 함수 본문, 헬퍼 주입, 샌드박스 실행(CSP 무관) | `{"result":…,"log":[…]}` |
+| `[SPACE] <이름>` / `off` / `close <이름>` · `[SPACES]` | 포커스 안 뺏는 에이전트 전용 창의 탭 그룹. 이후 `@` 없는 마커는 Space를 대상으로 | 상태 |
+| `[HANDOFF] [이름] [:: 메모]` · `[TAKEOVER] [이름]` | 사용자에게 제어권 넘김/회수. 넘긴 동안 변경 마커는 `handed_off` 실패(읽기는 허용). 사용자가 HUD에 `/done` 입력 시 반환 + 인박스 알림 | 상태 |
+| `[LEARN] <도메인>\n<json>` · `[LEARNED] [도메인\|url]` · `[FORGET] <도메인>` | 사이트별 노트·셀렉터·레시피 저장/조회/삭제. 저장된 노트는 브레인 위임 프롬프트에 자동 첨부 | 요약 |
+| `[RECIPE@site] <도메인>/<이름> [\n<json args>]` | 저장된 `[RUN]` 레시피 실행 (`args` 주입) | `[RUN]`과 동일 |
+
+- `@N`은 `[CLICK]/[FILL]/[TYPE]/[SUBMIT]/[DOM]/[ATTR]/[UPLOAD]/[WAIT]/[DIFF] click:@N` 어디서나 셀렉터 대신 사용. 페이지 이동·재렌더로 사라지면 `reason: stale_ref` → `[OUTLINE]` 재실행.
+- `[RUN]` 헬퍼: `open, outline, dom, links, attr, click, clickText, fill, type, submit, upload, wait, js, cdp, shot, snap, diff, close, tabs, fetchText, download, say, learned, space, useSpace, useTab, handOff, log, sleep, marker`. 실패한 마커는 `e.reason`을 가진 예외 → `try/catch` 가능. 미처리 시 태스크가 그 reason으로 실패. 스크립트 안에서 `[RUN]` 중첩 불가, 제한 180초.
+- Space 지정: `[CLICK@space:leads] …`, 스크립트는 `useSpace('leads')` — 병렬 스크립트끼리 충돌하지 않게 하려면 전역 `[SPACE]` 대신 이걸 써라.
 
 ## 3. HUD — 시각 감독 + 양방향 채팅
 
@@ -114,11 +136,24 @@ curl -sf -H "Authorization: Bearer $SECRET" \
 
 **대량 다운로드**: 직렬 큐가 브라우저의 다중 다운로드 차단·중복을 원천 방지. 파일명 충돌은 `:: 폴더/이름`으로. `in_progress`면 `[DOWNLOAD?] id`로 재조회 — **디스크 폴링·맹목 재시도 금지**. 실전 검증: `[ATTR] img :: src` 수집 → 개별 `[DOWNLOAD] url :: tigers/tiger-N.jpg` 10연속 10/10 무결.
 
+**아웃라인 → ref로 조작 (v0.7.0, 셀렉터 추측 금지)**: `[OUTLINE@site]` → 원하는 줄의 `@N` → `[CLICK@site] @N` / `[TYPE@site] @N\n값`. 다단계는 `[RUN]` 한 번으로:
+```
+[RUN@site]
+const o = await outline(); log(o.split('\n').slice(0, 30).join('\n'));
+await type('@7', 'webclaw'); await click('@8'); await wait('text:결과');
+return await links('.result a');
+```
+
+**사용자 개입이 필요한 단계(로그인·캡차·결제 확인)**: `[SPACE] job` → 작업 → `[HANDOFF] job :: 로그인 부탁드립니다` → 인박스에서 `[space job] user returned control (/done)` 수신 → 재개.
+
 **링크·속성 수집 → 개별 처리**: `[LINKS] table a[href*="…"]` 또는 `[ATTR] img :: src` → 각 URL을 [DOWNLOAD]/[FETCH]/[OPEN].
 
 ## 5. 함정과 한계
 
-- **CSP 사이트에서 [JS] 불가**: `js blocked by page CSP…` 응답 → 정적 마커([DOM]/[LINKS]/[CLICK]/[FILL])로 우회. HUD·[SAY]는 CSP 무관.
+- **CSP 사이트에서 [JS]**: v0.7.0부터 CDP `Runtime.evaluate`로 자동 재시도. CDP가 꺼져 있으면 여전히 `js blocked by page CSP…` → 정적 마커로 우회. HUD·[SAY]·[RUN]은 CSP 무관.
+- **CDP 한계**: 메인 프레임 기준 — iframe 안 `@N` 클릭은 스크립트 클릭으로 폴백, `[UPLOAD]`는 메인 프레임만. 다른 디버거(DevTools 확장 등)가 붙어 있거나 `cfg.cdp:"off"`면 `cdp_unavailable`.
+- **Space 창은 포커스되지 않은 별도 창** — 가려진 창은 렌더링이 느려질 수 있다. 화면이 필요한 작업은 `[SHOT]`(CDP 캡처)로 확인.
+- **설치/업데이트 직후 수 초**: offscreen 문서가 재생성되며 그 사이 받은 태스크 응답이 유실될 수 있다 — presence 재확인 후 디스패치.
 - **출력 2MB 캡**: 초과 시 `…[truncated, N more bytes]` 트레일러. 보이면 셀렉터로 좁혀 재요청 — 잘린 결과를 전체로 착각 금지.
 - **task-result JSON 파싱 실패 가능**(대형 output의 invalid escape) — strict=False+예외 처리.
 - **응답 성공 ≠ 저장 완료** — write→read-back 생략 금지.

@@ -8,9 +8,12 @@ async function req(path, body){ const r=await fetch("http://"+BUS+path,{method:b
   await new Promise(r=>setTimeout(r,2500)); // wait for join
   for (const [label,instr] of [["LLM(브레인 위임)","In one sentence: what causes flash in injection molding?"],["[FETCH]","[FETCH] http://127.0.0.1:4000/api/health"]]){
     const tid="wc-"+label.replace(/\W/g,'')+Date.now();
-    await req("/api/task",{to:"webclaw@node-test",role:"executor",work_key:"WK-2a56b4f1",task_id:tid,instructions:instr});
+    const [,sub]=await req("/api/task",{to:"webclaw@node-test",role:"executor",work_key:"WK-2a56b4f1",task_id:tid,instructions:instr});
+    // older bus releases ignore the caller's task_id and lack /api/task-result —
+    // poll the id the bus actually returned via /api/task/:id (both versions)
+    const id=(JSON.parse(sub).task_id)||tid;
     let done=false;
-    for(let s=0;s<40;s++){ await new Promise(r=>setTimeout(r,1000)); const [c,b]=await req("/api/task-result/"+tid); if(c===200){ const o=JSON.parse(b); console.log(`  ✅ ${label} (${s+1}s, backend=${o.backend}): ${String(o.output).trim().slice(0,130)}`); done=true; break; } }
+    for(let s=0;s<40;s++){ await new Promise(r=>setTimeout(r,1000)); const [c,b]=await req("/api/task/"+id); if(c===200){ const o=JSON.parse(b); console.log(`  ✅ ${label} (${s+1}s, backend=${o.backend}): ${String(o.output).trim().slice(0,130)}`); done=true; break; } }
     if(!done) console.log("  ❌ "+label+" 무응답");
   }
   wc.disconnect(); process.exit(0);

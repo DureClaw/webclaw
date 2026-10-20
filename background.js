@@ -1,6 +1,9 @@
 // webclaw background service worker — owns chrome.storage/tabs/scripting and the
 // offscreen document that holds the persistent bus WebSocket.
 
+// v0.7.0 modules: CDP layer, @ref outline, agent Spaces, site learnings.
+importScripts("cdp.js", "refs.js", "spaces.js", "learn.js");
+
 const CAP = 2000000; // raised for large grading pages (2MB)
                     // task.result frame is fine (screenshots already send ~262KB).
 
@@ -10,20 +13,26 @@ const CAP = 2000000; // raised for large grading pages (2MB)
 // surfaces as an uncaught "Offscreen document closed before fully loading."
 // Serialize every call through one chain so only one create/close is ever
 // in flight, and swallow the benign race error if it still slips through.
+// `force` (onInstalled/onStartup) only replaces a document left over from an
+// earlier service-worker life. One this SW instance created moments ago is
+// already fresh — recreating it killed its bus socket mid-task and dropped
+// the first task's result right after install/update.
 let offscreenChain = Promise.resolve();
+let offscreenFresh = false;
 function ensureOffscreen(force = false) {
   offscreenChain = offscreenChain.then(async () => {
     const has = await chrome.offscreen.hasDocument();
     if (has) {
-      if (!force) return;
+      if (!force || offscreenFresh) return;
       await chrome.offscreen.closeDocument();
     }
     try {
       await chrome.offscreen.createDocument({
-        url: "offscreen.html?v=0.6.4",
+        url: "offscreen.html?v=0.7.0",
         reasons: ["BLOBS"],
         justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
       });
+      offscreenFresh = true;
     } catch (e) {
       if (!/closed before fully loading|single offscreen document/i.test(String(e))) throw e;
     }
@@ -210,12 +219,14 @@ async function standaloneHandle(tabId, text, url) {
     "- to fill: [FILL] <css> = <value>\n- to download: [DOWNLOAD] <url> [:: name]\n" +
     "- otherwise answer the user in one short sentence (no marker).\n" +
     "Current tab: " + (url || "") + "\nUser: " + text;
+  const notes = lnSummary(await lnFor(url || "").catch(() => null)); // v0.7.0
+  const fullPrompt = notes ? notes + "\n\n" + prompt : prompt;
   const h = { "content-type": "application/json" };
   if (cfg.brainToken) h.authorization = "Bearer " + cfg.brainToken;
   let out = "";
   try {
     const r = await fetch(String(cfg.brainUrl).replace(/\/$/, "") + "/brain/exec", {
-      method: "POST", headers: h, body: JSON.stringify({ prompt }),
+      method: "POST", headers: h, body: JSON.stringify({ prompt: fullPrompt }),
     });
     const j = await r.json();
     out = (j.output ?? j.error ?? "").trim();
@@ -242,6 +253,15 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     hudNotify(tabId, "🧑 나: " + msg.text);
     chrome.storage.local.set({ lastChatTabId: tabId });
   }
+  // v0.7.0 — "/done" in a handed-off Space returns control to the agent and
+  // tells the master (inbox) so it can resume.
+  if (tabId && /^\/(done|return)\b/i.test(String(msg.text).trim())) {
+    chrome.tabs.get(tabId).then(spUserDone).then((name) => {
+      if (!name) return;
+      hudNotify(tabId, "🤖 제어권을 에이전트에게 돌려줬습니다 (space " + name + ")", null, true);
+      chrome.runtime.sendMessage({ type: "busInbox", text: "[space " + name + "] user returned control (/done)", url: msg.url || "" }).catch(() => {});
+    }).catch(() => {});
+  }
   readCfg().then((cfg) => {
     if (cfg.standalone && cfg.brainUrl) {
       // single-machine: process locally, no bus/master needed.
@@ -266,6 +286,11 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 // Pick the target tab: a URL-substring match (to hit a specific logged-in
 // session across many tabs), else the active tab of the last focused window.
 async function pickTab(urlMatch) {
+  // v0.7.0 — "space:<name>" (or the node's current space when no @ is given)
+  // targets the agent Space instead of the human's active tab.
+  const { space, rest } = await spTargetOf(urlMatch);
+  if (space) return await spTab(space);
+  urlMatch = rest;
   if (urlMatch) {
     const tabs = await chrome.tabs.query({});
     // Skip discarded (memory-unloaded) tabs — scripting cannot reach them and
@@ -329,13 +354,26 @@ async function groupWebclawTab(tab) {
 // added to the fleet's tab group so opened tabs stay clustered.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "open") return;
-  chrome.tabs.create({ url: msg.url, active: true }).then(async (tab) => {
+  (async () => {
+    // v0.7.0 — inside a Space: new tab in the unfocused agent window.
+    const { space } = await spTargetOf(msg.urlMatch);
+    if (space) {
+      const { spaces } = await spLoad();
+      if (spaces[space] && spaces[space].owner === "user") {
+        return sendResponse({ text: "(space '" + space + "' is handed off to the user)", failed: true, reason: "handed_off" });
+      }
+      const tab = await spOpen(space, msg.url);
+      await waitTabReady(tab.id, 20000);
+      const t = await chrome.tabs.get(tab.id);
+      return sendResponse({ text: "opened in space " + space + " (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || "") });
+    }
+    const tab = await chrome.tabs.create({ url: msg.url, active: true });
     await groupWebclawTab(tab);
     await waitTabReady(tab.id, 20000);
     const t = await chrome.tabs.get(tab.id);
     hudNotify(tab.id, "[OPEN] " + msg.url.slice(0, 80));
     sendResponse({ text: "opened (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || "") });
-  }).catch((e) => sendResponse({ text: "open error: " + e }));
+  })().catch((e) => sendResponse({ text: "open error: " + e }));
   return true; // async
 });
 
@@ -376,32 +414,48 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   pickTab(msg.urlMatch).then(async (tab) => {
     if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
     await waitTabReady(tab.id); // #4
+    let r;
+    try { r = await wcResolve(tab, msg.query); } catch (e) { sendResponse({ text: e.message, failed: true, reason: e.reason }); return; }
     chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: r.target,
       func: (q, cap, mode, attr) => {
         const capped = (s) => (s.length > cap ? s.slice(0, cap) + "\n…[truncated, " + (s.length - cap) + " more bytes]" : s);
+        // @refs may sit inside open shadow roots — fall back to a deep search
+        const deepAll = (sel) => {
+          const hits = [...document.querySelectorAll(sel)];
+          if (hits.length || !/^\[data-wc-ref=/.test(sel)) return hits;
+          const stack = [document];
+          while (stack.length) {
+            const root = stack.pop();
+            for (const el of root.querySelectorAll("*")) if (el.shadowRoot) { hits.push(...el.shadowRoot.querySelectorAll(sel)); stack.push(el.shadowRoot); }
+          }
+          return hits;
+        };
         try {
           if (mode === "links") {
             const els = [...document.querySelectorAll(q || "a[href]")];
             return capped(JSON.stringify(els.map((a) => ({ text: (a.innerText || "").trim().slice(0, 200), href: a.href }))));
           }
           if (mode === "attr") {
-            const els = [...document.querySelectorAll(q)];
+            const els = deepAll(q);
             if (!els.length) return "(no match for: " + q + ")";
             return capped(JSON.stringify(els.map((e) => e.getAttribute(attr))));
           }
           if (!q) return capped(document.title + " | " + location.href + "\n" + document.body.innerText);
-          const els = [...document.querySelectorAll(q)];
+          const els = deepAll(q);
           if (!els.length) return "(no match for: " + q + ")";
           return capped(els.map((e) => (e.innerText || e.textContent || "").trim()).join("\n"));
         } catch (e) { return "DOM error: " + e; }
       },
-      args: [msg.query || "", CAP, msg.mode || "", msg.attr || ""],
+      args: [r.css || "", CAP, msg.mode || "", msg.attr || ""],
     }).then((res) => {
-      const out = res && res[0] ? res[0].result : "(no result)";
+      let out = res && res[0] ? res[0].result : "(no result)";
+      if (r.ref) out = String(out).split(r.css).join(r.ref);
       hudNotify(tab.id, "[" + (msg.mode || "dom").toUpperCase() + "] " + (msg.query || "(page)") + " → " + String(out).length + " chars", null, true); // #10 working
       sendResponse({ text: out });
-    }).catch((e) => sendResponse({ text: "scripting error: " + e }));
+    }).catch((e) => sendResponse(r.ref && /document|frame/i.test(String(e))
+      ? { text: "(stale ref: " + r.ref + " — run [OUTLINE] again)", failed: true, reason: "stale_ref" }
+      : { text: "scripting error: " + e }));
   });
   return true; // async
 });
@@ -679,61 +733,27 @@ function hudInjected(text, click, off, working, hist, scope) {
 // bodies can use `await` (via async IIFE) for wait-then-read workflows.
 // #3 — fill re-reads the value after dispatching events and reports the value
 // the page actually kept (framework handlers may transform or reject it).
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "act") return;
-  pickTab(msg.urlMatch).then(async (tab) => {
-    if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
-    await waitTabReady(tab.id); // #4
-    // [HUD] on|off — manual toggle of the visual supervision layer. (#10)
-    if (msg.action === "hud") {
-      const on = String(msg.code || "").trim() !== "off";
-      hudNotify(tab.id, on ? "HUD on — 이 탭에서 에이전트가 작업합니다" : "__OFF__")
-        .then(() => sendResponse({ text: "hud " + (on ? "on" : "off") + " @ tab " + tab.id }));
-      return;
-    }
-    // [CLOSE] — close the target tab (cleanup after batch [OPEN]/[DOM] runs so
-    // hundreds of scripted tabs don't pile up in the user's browser). Native
-    // chrome.tabs.remove, not page-script window.close() — CSP on the target
-    // page would otherwise block it and self-close is unreliable for
-    // extension-opened tabs regardless.
-    if (msg.action === "close") {
-      chrome.tabs.remove(tab.id)
-        .then(() => sendResponse({ text: "closed tab " + tab.id }))
-        .catch((e) => sendResponse({ text: "close error: " + e }));
-      return;
-    }
-    // [SHOT] [<relative/path.jpg>] — screenshot the target tab's visible
-    // viewport, saved to disk through the same queue as [DOWNLOAD]. A data:
-    // URL feeds chrome.downloads.download fine in an MV3 service worker —
-    // URL.createObjectURL, tried first, does NOT exist there (confirmed
-    // live: "createObjectURL is not a function"), so this stays data:.
-    // captureVisibleTab only works on the ACTIVE tab of its window, so focus
-    // the target tab first and give it a beat to repaint before capturing.
-    if (msg.action === "shot") {
-      chrome.tabs.update(tab.id, { active: true })
-        .then(() => new Promise((r) => setTimeout(r, 300)))
-        .then(() => chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 }))
-        .then((dataUrl) => {
-          const path = (msg.code || "").trim() || ("webclaw-shots/shot-" + Date.now() + ".jpg");
-          return queueDownload(dataUrl, path);
-        })
-        .then((text) => {
-          hudNotify(tab.id, "📸 " + text.slice(0, 140), null, true);
-          sendResponse({ text });
-        })
-        .catch((e) => sendResponse({ text: "shot error: " + e }));
-      return;
-    }
-    // [SAY] <text> — master's reply rendered into the HUD chat panel. (#11)
-    if (msg.action === "say") {
-      hudNotify(tab.id, "🤖 master: " + String(msg.code || ""))
-        .then(() => sendResponse({ text: "said @ tab " + tab.id }));
-      return;
-    }
-    chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: async (action, selector, value, code, cap) => {
-        const q = (s) => document.querySelector(s);
+// v0.7.0 — selectors may be @refs from [OUTLINE]; [CLICK]/[TYPE]/[SHOT]/[JS]
+// upgrade to CDP (trusted input, background capture, CSP-proof eval) when the
+// debugger is available, and fall back to the scripting path otherwise.
+function wcActInjected(action, selector, value, code, cap) {
+  return (async () => {
+        // @refs may live inside open shadow roots → deep fallback
+        const q = (s) => {
+          const hit = document.querySelector(s);
+          if (hit || !/^\[data-wc-ref=/.test(s)) return hit;
+          const stack = [document];
+          while (stack.length) {
+            const root = stack.pop();
+            for (const el of root.querySelectorAll("*")) {
+              if (!el.shadowRoot) continue;
+              const m = el.shadowRoot.querySelector(s);
+              if (m) return m;
+              stack.push(el.shadowRoot);
+            }
+          }
+          return null;
+        };
         // ── helpers (static function scope — CSP-safe, no eval) ──────────────
         const visible = (el) => {
           if (!el) return false;
@@ -783,7 +803,39 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
           const sub = (x, y) => { const sy = new Set(y); return [...new Set(x)].filter((v) => !sy.has(v)); };
           return { addedFields: sub(b.fields, a.fields), removedFields: sub(a.fields, b.fields), addedButtons: sub(b.buttons, a.buttons), removedButtons: sub(a.buttons, b.buttons), addedText: sub(b.texts, a.texts).slice(0, 25), removedText: sub(a.texts, b.texts).slice(0, 25), errors: [...new Set(b.errors)] };
         };
+        const valueOf = (el) => (el.isContentEditable ? el.innerText : el.value);
         try {
+          // ── v0.7.0 CDP support actions ──
+          if (action === "locate") {
+            // scroll into view, report the center and whether a click there
+            // would actually land on the element (not on an overlay)
+            const el = q(selector);
+            if (!el) return "(no match: " + selector + ")";
+            el.scrollIntoView({ block: "center", inline: "center" });
+            const r = el.getBoundingClientRect();
+            const x = Math.round(Math.min(Math.max(r.left + r.width / 2, 1), innerWidth - 2));
+            const y = Math.round(Math.min(Math.max(r.top + r.height / 2, 1), innerHeight - 2));
+            const root = el.getRootNode();
+            const hit = (root.elementFromPoint ? root : document).elementFromPoint(x, y);
+            return JSON.stringify({ x, y, ok: !!hit && (hit === el || el.contains(hit)) });
+          }
+          if (action === "focus") {
+            const el = q(selector);
+            if (!el) return "(no match: " + selector + ")";
+            el.scrollIntoView({ block: "center" });
+            el.focus();
+            if (typeof el.select === "function") el.select();
+            else if (el.isContentEditable) { const rg = document.createRange(); rg.selectNodeContents(el); const sl = getSelection(); sl.removeAllRanges(); sl.addRange(rg); }
+            return document.activeElement === el || el.contains(document.activeElement) ? "focused" : "(focus refused: " + selector + ")";
+          }
+          if (action === "readvalue") {
+            const el = q(selector);
+            return el ? JSON.stringify(valueOf(el)) : "(no match: " + selector + ")";
+          }
+          if (action === "exists") {
+            if (selector.startsWith("text:")) return (document.body && document.body.innerText.includes(selector.slice(5))) ? "yes" : "no";
+            return visible(q(selector)) ? "yes" : "no";
+          }
           if (action === "click") {
             const el = q(selector);
             if (!el) return "(no match: " + selector + ")";
@@ -815,13 +867,18 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
             const el = q(selector);
             if (!el) return "(no match: " + selector + ")";
             el.focus();
-            const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement : HTMLInputElement;
-            const setter = Object.getOwnPropertyDescriptor(proto.prototype, "value");
-            if (setter && setter.set) { setter.set.call(el, value); } else { el.value = value; }
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-            el.dispatchEvent(new Event("change", { bubbles: true }));
+            if (el.isContentEditable) {
+              el.textContent = value;
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+            } else {
+              const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement : el.tagName === "SELECT" ? HTMLSelectElement : HTMLInputElement;
+              const setter = Object.getOwnPropertyDescriptor(proto.prototype, "value");
+              if (setter && setter.set) { setter.set.call(el, value); } else { el.value = value; }
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+            }
             // #3 read-back: report what the page actually kept, not what we sent.
-            const kept = el.value;
+            const kept = valueOf(el);
             return kept === value
               ? "filled " + selector + " = " + kept
               : "filled " + selector + " = " + kept + " (WARNING: page kept a different value than sent: " + value + ")";
@@ -850,39 +907,212 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
             return "js blocked by page CSP (eval forbidden on this site) — use the static markers [DOM]/[CLICK]/[FILL]/[SUBMIT] instead. " + m;
           return action + " error: " + e;
         }
-      },
-      args: [msg.action, msg.selector || "", msg.value || "", msg.code || "", CAP],
-    }).then(async (res) => {
-      let out = res && res[0] ? String(res[0].result) : "(no result)";
-      // #16 — [DIFF] ... :: screenshot — attach a visual capture alongside the
-      // structured DOM diff, for cases the diff alone can't judge (layout
-      // breakage, hidden fields, custom-widget rendering).
-      if (msg.action === "diff" && msg.shot) {
-        try {
-          await chrome.tabs.update(tab.id, { active: true });
-          await new Promise((r) => setTimeout(r, 200));
-          const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
-          const shotText = await queueDownload(dataUrl, "webclaw-shots/diff-" + Date.now() + ".jpg");
-          const j = JSON.parse(out);
-          j.screenshot = shotText;
-          out = JSON.stringify(j);
-        } catch (e) { /* diff still returns without a screenshot */ }
+  })();
+}
+
+function wcCapStr(s) {
+  s = typeof s === "string" ? s : JSON.stringify(s);
+  if (s === undefined) s = "undefined";
+  return s.length > CAP ? s.slice(0, CAP) + "\n…[truncated, " + (s.length - CAP) + " more bytes]" : s;
+}
+
+async function wcInject(r, action, selector, value, code) {
+  const res = await chrome.scripting.executeScript({ target: r.target, func: wcActInjected, args: [action, selector || "", value || "", code || "", CAP] });
+  return res && res[0] ? String(res[0].result) : "(no result)";
+}
+
+// Trusted input & CSP-proof eval only make sense in the main frame (CDP
+// coordinates/evaluation are main-frame relative).
+async function wcCdpOk(tab, r) { return (!r || r.frameId === 0) && await WcCdp.enabled(tab.id); }
+
+// Actions that change page/tab state — refused on a handed-off Space.
+const WC_MUTATING = new Set(["click", "clicktext", "diff", "fill", "type", "submit", "js", "close", "cdp", "upload"]);
+
+async function wcAct(msg) {
+  const tab = await pickTab(msg.urlMatch);
+  if (!tab) return { text: "(no target tab)" };
+  await waitTabReady(tab.id); // #4
+  if (WC_MUTATING.has(msg.action)) { const blocked = await spBlock(tab); if (blocked) return blocked; }
+  // [HUD] on|off — manual toggle of the visual supervision layer. (#10)
+  if (msg.action === "hud") {
+    const on = String(msg.code || "").trim() !== "off";
+    await hudNotify(tab.id, on ? "HUD on — 이 탭에서 에이전트가 작업합니다" : "__OFF__");
+    return { text: "hud " + (on ? "on" : "off") + " @ tab " + tab.id };
+  }
+  // [CLOSE] — close the target tab (cleanup after batch [OPEN]/[DOM] runs so
+  // hundreds of scripted tabs don't pile up in the user's browser). Native
+  // chrome.tabs.remove, not page-script window.close() — CSP on the target
+  // page would otherwise block it and self-close is unreliable for
+  // extension-opened tabs regardless.
+  if (msg.action === "close") {
+    try { await chrome.tabs.remove(tab.id); return { text: "closed tab " + tab.id }; }
+    catch (e) { return { text: "close error: " + e }; }
+  }
+  // [SHOT] [<relative/path.jpg>] — screenshot the target tab, saved to disk
+  // through the same queue as [DOWNLOAD]. v0.7.0: CDP capture first (works on
+  // background tabs, no focus stealing); fallback = focus the tab and use
+  // captureVisibleTab (active-tab only). A data: URL feeds
+  // chrome.downloads.download fine in an MV3 service worker —
+  // URL.createObjectURL does NOT exist there, so this stays data:.
+  if (msg.action === "shot") {
+    try {
+      const path = (msg.code || "").trim() || ("webclaw-shots/shot-" + Date.now() + ".jpg");
+      let dataUrl = null, via = "";
+      if (await wcCdpOk(tab)) { try { dataUrl = await WcCdp.screenshot(tab.id); via = " (cdp)"; } catch (e) {} }
+      if (!dataUrl) {
+        await chrome.tabs.update(tab.id, { active: true });
+        await new Promise((r) => setTimeout(r, 300));
+        dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
       }
-      // #14 — classify the well-known failure shapes the page script returns
-      // as plain success-looking strings (unmatched selector, value mismatch)
-      // so runTask can elevate them to status:"failed" instead of the master
-      // having to string-sniff "(no match:" out of a "done" response.
-      let reason = null;
-      if (/^\(no match: |^\(no clickable text: |^\(diff: target not found: /.test(out)) reason = "no_match";
-      else if (msg.action === "fill" && /WARNING: page kept a different value than sent:/.test(out)) reason = "value_mismatch";
-      // #10 — mirror the action into the on-page HUD (border + log; ghost
-      // cursor when the click reported its coordinates).
-      let click = null;
-      const cm = out.match(/@(\d+),(\d+)$/);
-      if ((msg.action === "click" || msg.action === "clicktext") && cm) click = { x: +cm[1], y: +cm[2] };
-      hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (msg.selector || msg.value || (msg.code || "").slice(0, 60)) + " → " + out.slice(0, 90), click, true); // working
-      sendResponse(reason ? { text: out, failed: true, reason } : { text: out });
-    }).catch((e) => sendResponse({ text: "act error: " + e }));
-  });
+      const text = (await queueDownload(dataUrl, path)) + via;
+      hudNotify(tab.id, "📸 " + text.slice(0, 140), null, true);
+      return { text };
+    } catch (e) { return { text: "shot error: " + e }; }
+  }
+  // [SAY] <text> — master's reply rendered into the HUD chat panel. (#11)
+  if (msg.action === "say") {
+    await hudNotify(tab.id, "🤖 master: " + String(msg.code || ""));
+    return { text: "said @ tab " + tab.id };
+  }
+  // [OUTLINE] — @ref outline of all frames.
+  if (msg.action === "outline") {
+    const text = await wcOutline(tab, msg.code);
+    hudNotify(tab.id, "[OUTLINE] " + text.split("\n")[1], null, true);
+    return { text: wcCapStr(text) };
+  }
+  // [CDP] Domain.method {params} — raw protocol, deny-listed for credential dumps.
+  if (msg.action === "cdp") {
+    if (!(await wcCdpOk(tab))) return { text: "(cdp unavailable — debugger permission missing, cfg.cdp off, or refused by the user)", failed: true, reason: "cdp_unavailable" };
+    if (await WcCdp.denied(msg.method)) return { text: "(cdp method denied by policy: " + msg.method + ")", failed: true, reason: "cdp_denied" };
+    try {
+      const r = await WcCdp.send(tab.id, msg.method, msg.params || {});
+      hudNotify(tab.id, "[CDP] " + msg.method, null, true);
+      return { text: wcCapStr(r === undefined ? {} : r) };
+    } catch (e) { return { text: "cdp error: " + ((e && e.message) || e), failed: true, reason: "cdp_error" }; }
+  }
+
+  // ── selector-taking actions: resolve @refs to a frame-precise target ──
+  let r;
+  try { r = await wcResolve(tab, msg.selector); } catch (e) { return { text: e.message, failed: true, reason: e.reason }; }
+  const label = r.ref || r.css;
+  const relabel = (s) => (r.ref ? String(s).split(r.css).join(r.ref) : String(s));
+  let code = msg.code || "";
+  // [DIFF] click:@N — resolve the ref inside the action spec too
+  if (msg.action === "diff") {
+    const dm = String(code).trim().match(/^click:(@\d+)$/);
+    if (dm) {
+      try { r = await wcResolve(tab, dm[1]); } catch (e) { return { text: e.message, failed: true, reason: e.reason }; }
+      code = "click:" + r.css;
+    }
+  }
+
+  // [UPLOAD] — CDP only (scripting cannot set a FileList).
+  if (msg.action === "upload") {
+    if (!(await wcCdpOk(tab, r))) return { text: "(upload needs CDP in the main frame — unavailable here)", failed: true, reason: "cdp_unavailable" };
+    try {
+      const ok = await WcCdp.setFiles(tab.id, r.css, msg.files || []);
+      if (!ok) return { text: "(no match: " + label + ")", failed: true, reason: r.ref ? "stale_ref" : "no_match" };
+      hudNotify(tab.id, "[UPLOAD] " + label + " ← " + (msg.files || []).length + " file(s)", null, true);
+      return { text: "uploaded " + (msg.files || []).join(", ") + " → " + label };
+    } catch (e) { return { text: "upload error: " + ((e && e.message) || e), failed: true, reason: "cdp_error" }; }
+  }
+
+  // [WAIT] — poll until present & visible (survives navigations in between).
+  if (msg.action === "wait") {
+    const timeout = Number(msg.value) > 0 ? Number(msg.value) : 10000;
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      try {
+        if ((await wcInject(r, "exists", r.css)) === "yes") return { text: "found " + label + " after " + (Date.now() - t0) + "ms" };
+      } catch (e) { if (r.ref) return { text: "(stale ref: " + r.ref + " — run [OUTLINE] again)", failed: true, reason: "stale_ref" }; }
+      await new Promise((res) => setTimeout(res, 300));
+    }
+    return { text: "(timeout after " + timeout + "ms waiting for " + label + ")", failed: true, reason: "timeout" };
+  }
+
+  let out, click = null, via = "";
+  try {
+    // trusted CDP click — only if the center point really hits the element;
+    // otherwise (overlay, iframe ref, no CDP) keep the scripted el.click().
+    if (msg.action === "click" && await wcCdpOk(tab, r)) {
+      const loc = await wcInject(r, "locate", r.css);
+      if (loc.startsWith("{")) {
+        const p = JSON.parse(loc);
+        if (p.ok) {
+          try { await WcCdp.click(tab.id, p.x, p.y); out = "clicked " + label + " (trusted) @" + p.x + "," + p.y; } catch (e) {}
+        }
+      }
+    }
+    // trusted typing: focus + select existing text, then Input.insertText
+    if (!out && msg.action === "type" && msg.value && await wcCdpOk(tab, r)) {
+      if ((await wcInject(r, "focus", r.css)) === "focused") {
+        try {
+          await WcCdp.insertText(tab.id, msg.value);
+          const kept = JSON.parse(await wcInject(r, "readvalue", r.css));
+          out = kept === msg.value
+            ? "typed " + label + " = " + kept + " (trusted)"
+            : "typed " + label + " = " + kept + " (WARNING: page kept a different value than sent: " + msg.value + ")";
+        } catch (e) {}
+      }
+    }
+    if (!out) out = relabel(await wcInject(r, msg.action, r.css, msg.value, code));
+    // CSP blocked eval → retry through CDP Runtime.evaluate (no eval involved)
+    if (msg.action === "js" && /^js blocked by page CSP/.test(out) && await wcCdpOk(tab, r)) {
+      try { out = wcCapStr(await WcCdp.evaluate(tab.id, code)); via = "cdp"; }
+      catch (e) { out = "js error (via cdp): " + ((e && e.message) || e); }
+    }
+  } catch (e) {
+    if (r.ref && /document|frame/i.test(String(e))) return { text: "(stale ref: " + r.ref + " — run [OUTLINE] again)", failed: true, reason: "stale_ref" };
+    return { text: "act error: " + e };
+  }
+  // #16 — [DIFF] ... :: screenshot — attach a visual capture alongside the
+  // structured DOM diff, for cases the diff alone can't judge (layout
+  // breakage, hidden fields, custom-widget rendering).
+  if (msg.action === "diff" && msg.shot) {
+    try {
+      let dataUrl = null;
+      if (await wcCdpOk(tab)) { try { dataUrl = await WcCdp.screenshot(tab.id); } catch (e) {} }
+      if (!dataUrl) {
+        await chrome.tabs.update(tab.id, { active: true });
+        await new Promise((res) => setTimeout(res, 200));
+        dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
+      }
+      const shotText = await queueDownload(dataUrl, "webclaw-shots/diff-" + Date.now() + ".jpg");
+      const j = JSON.parse(out);
+      j.screenshot = shotText;
+      out = JSON.stringify(j);
+    } catch (e) { /* diff still returns without a screenshot */ }
+  }
+  // #14 — classify the well-known failure shapes the page script returns
+  // as plain success-looking strings (unmatched selector, value mismatch)
+  // so runTask can elevate them to status:"failed" instead of the master
+  // having to string-sniff "(no match:" out of a "done" response.
+  let reason = null;
+  if (/^\(no match: |^\(no clickable text: |^\(diff: target not found: /.test(out)) reason = r.ref ? "stale_ref" : "no_match";
+  else if ((msg.action === "fill" || msg.action === "type") && /WARNING: page kept a different value than sent:/.test(out)) reason = "value_mismatch";
+  else if (via === "cdp" && /^js error \(via cdp\)/.test(out)) reason = "js_error";
+  // #10 — mirror the action into the on-page HUD (border + log; ghost
+  // cursor when the click reported its coordinates).
+  const cm = out.match(/@(\d+),(\d+)$/);
+  if ((msg.action === "click" || msg.action === "clicktext") && cm) click = { x: +cm[1], y: +cm[2] };
+  hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (r.ref || msg.selector || msg.value || (code || "").slice(0, 60)) + " → " + out.slice(0, 90), click, true); // working
+  return reason ? { text: out, failed: true, reason } : { text: out };
+}
+
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "act") return;
+  wcAct(msg).then(sendResponse, (e) => sendResponse({ text: "act error: " + e }));
+  return true; // async
+});
+
+// v0.7.0 — Spaces / hand-off, learnings.
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || (msg.type !== "space" && msg.type !== "learn" && msg.type !== "learnContext")) return;
+  (async () => {
+    if (msg.type === "space") return spHandle(msg);
+    if (msg.type === "learn") return lnHandle(msg);
+    const tab = await pickTab("");
+    return { text: tab ? lnSummary(await lnFor(tab.url)) : "" };
+  })().then(sendResponse, (e) => sendResponse({ text: String((e && e.message) || e), failed: true, reason: (e && e.reason) || "error" }));
   return true; // async
 });

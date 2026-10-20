@@ -200,3 +200,116 @@ test("version string stays in sync across manifest.json, core.js, and the offscr
   assert.equal(coreVersion, manifest.version, "core.js phx_join version drifted from manifest.json");
   assert.equal(offscreenVersion, manifest.version, "offscreen.html?v= cache-buster drifted from manifest.json");
 });
+
+// ---- v0.7.0 — native CDP, @refs, [RUN], Spaces, learnings ----------------
+
+const { runTask, parseCdp } = require("../core.js");
+
+test("[OUTLINE] and [SNAPSHOT] route to the outline action with the target tab", async () => {
+  const calls = [];
+  const hooks = { act: async (p) => { calls.push(p); return "refs: 0"; } };
+  await runTask("[OUTLINE@github.com] 50", {}, hooks);
+  await runTask("[SNAPSHOT]", {}, hooks);
+  assert.deepEqual(calls[0], { action: "outline", code: "50", urlMatch: "github.com" });
+  assert.equal(calls[1].action, "outline");
+});
+
+test("[CDP] parses method + JSON params; bad JSON fails with reason bad_args", async () => {
+  assert.deepEqual(parseCdp('Page.captureScreenshot {"format":"png"}'), { method: "Page.captureScreenshot", params: { format: "png" } });
+  assert.deepEqual(parseCdp("Page.reload"), { method: "Page.reload", params: {} });
+  const hooks = { act: async () => "{}" };
+  const { ws } = makeNode(hooks);
+  const id = await dispatch(ws, hooks, "[CDP] Page.reload {oops");
+  const r = resultFor(ws, id);
+  assert.equal(r.status, "failed");
+  assert.equal(r.reason, "bad_args");
+});
+
+test("[UPLOAD] splits the file list; [WAIT] carries the timeout", async () => {
+  const calls = [];
+  const hooks = { act: async (p) => { calls.push(p); return "ok"; } };
+  await runTask("[UPLOAD] @7 :: /tmp/a.pdf, /tmp/b.png", {}, hooks);
+  await runTask("[WAIT] text:Saved :: 5000", {}, hooks);
+  assert.deepEqual(calls[0].files, ["/tmp/a.pdf", "/tmp/b.png"]);
+  assert.equal(calls[0].selector, "@7");
+  assert.equal(calls[1].action, "wait");
+  assert.equal(calls[1].selector, "text:Saved");
+  assert.equal(calls[1].value, "5000");
+});
+
+test("[TYPE] now routes to the trusted 'type' action, [FILL] stays 'fill'", async () => {
+  const calls = [];
+  const hooks = { act: async (p) => { calls.push(p); return "ok"; } };
+  await runTask("[TYPE] @3\nhello", {}, hooks);
+  await runTask("[FILL] @3\nhello", {}, hooks);
+  assert.equal(calls[0].action, "type");
+  assert.equal(calls[0].selector, "@3");
+  assert.equal(calls[1].action, "fill");
+});
+
+test("[RUN] hands the script body and target to hooks.run", async () => {
+  let got;
+  const hooks = { run: async (code, o) => { got = { code, o }; return '{"result":1}'; } };
+  const out = await runTask("[RUN@space:leads] const a = 1;\nreturn a;", {}, hooks);
+  assert.equal(out, '{"result":1}');
+  assert.equal(got.code, "const a = 1;\nreturn a;");
+  assert.equal(got.o.urlMatch, "space:leads");
+});
+
+test("noBrain (script context): nested [RUN] and unknown markers fail instead of reaching the brain", async () => {
+  const hooks = { run: async () => "x" };
+  await assert.rejects(runTask("[RUN] 1", {}, hooks, { noBrain: true }), (e) => e.reason === "nested_run");
+  await assert.rejects(runTask("[CLIK] #x", { brainUrl: "http://never" }, hooks, { noBrain: true }), (e) => e.reason === "bad_args");
+});
+
+test("[RECIPE] fetches the learned script and runs it with JSON args", async () => {
+  const seen = {};
+  const hooks = {
+    learn: async (p) => { seen.learn = p; return "return args.q;"; },
+    run: async (code, o) => { seen.run = { code, o }; return "ok"; },
+  };
+  await runTask('[RECIPE] github.com/search\n{"q":"webclaw"}', {}, hooks);
+  assert.deepEqual(seen.learn, { op: "recipe", domain: "github.com", name: "search" });
+  assert.equal(seen.run.code, "return args.q;");
+  assert.deepEqual(seen.run.o.args, { q: "webclaw" });
+});
+
+test("[LEARN]/[LEARNED]/[FORGET] map to learn ops", async () => {
+  const calls = [];
+  const hooks = { learn: async (p) => { calls.push(p); return "ok"; } };
+  await runTask('[LEARN] example.com\n{"notes":["n1"]}', {}, hooks);
+  await runTask("[LEARNED]", {}, hooks);
+  await runTask("[LEARNED] https://www.example.com/x", {}, hooks);
+  await runTask("[FORGET] example.com", {}, hooks);
+  assert.deepEqual(calls[0], { op: "set", domain: "example.com", data: { notes: ["n1"] } });
+  assert.deepEqual(calls[1], { op: "list" });
+  assert.deepEqual(calls[2], { op: "get", domain: "https://www.example.com/x" });
+  assert.deepEqual(calls[3], { op: "forget", domain: "example.com" });
+  await assert.rejects(runTask("[LEARN] example.com", {}, hooks), (e) => e.reason === "bad_args");
+});
+
+test("[SPACE]/[SPACES]/[HANDOFF]/[TAKEOVER] map to space ops; [OPEN] passes its target", async () => {
+  const calls = [];
+  const hooks = { space: async (p) => { calls.push(p); return "ok"; }, open: async (u, m) => { calls.push({ open: u, m }); return "ok"; } };
+  await runTask("[SPACE] leads", {}, hooks);
+  await runTask("[SPACES]", {}, hooks);
+  await runTask("[HANDOFF] leads :: 로그인 해주세요", {}, hooks);
+  await runTask("[TAKEOVER]", {}, hooks);
+  await runTask("[OPEN@space:leads] https://example.com", {}, hooks);
+  assert.deepEqual(calls[0], { op: "space", arg: "leads" });
+  assert.deepEqual(calls[1], { op: "list" });
+  assert.deepEqual(calls[2], { op: "handoff", arg: "leads", note: "로그인 해주세요" });
+  assert.deepEqual(calls[3], { op: "takeover", arg: "", note: "" });
+  assert.deepEqual(calls[4], { open: "https://example.com", m: "space:leads" });
+});
+
+test("brain delegation prepends learned site notes from hooks.learnContext", async () => {
+  const realFetch = global.fetch;
+  let body;
+  global.fetch = async (_u, init) => { body = JSON.parse(init.body); return { json: async () => ({ output: "ok" }) }; };
+  try {
+    const out = await runTask("summarize this page", { brainUrl: "http://brain" }, { learnContext: async () => "Site notes for example.com:\n- n1" });
+    assert.equal(out, "ok");
+    assert.equal(body.prompt, "Site notes for example.com:\n- n1\n\nsummarize this page");
+  } finally { global.fetch = realFetch; }
+});
