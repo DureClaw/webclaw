@@ -99,19 +99,28 @@ function shortlist(elements, goal, max = 240) {
   return scored.sort((a, b) => b.s - a.s || a.i - b.i).slice(0, max).sort((a, b) => a.i - b.i).map((x) => x.e);
 }
 
-const histLine = (h, i) => (i + 1) + ". " + h.kind + " " + (h.label || "") + (h.value != null ? " ← " + JSON.stringify(h.value) : "") + " → " + h.result;
+const histLine = (h, i) => (i + 1) + ". " + h.kind + " " + (h.label || "") +
+  (h.value != null ? " ← " + JSON.stringify(h.value) : h.secret ? " ← (secret value entered)" : "") + " → " + h.result;
+const ROLE_KIND = { button: "click", link: "click", checkbox: "click", radio: "click", tab: "click", menuitem: "click",
+  menuitemcheckbox: "click", menuitemradio: "click", option: "click", switch: "click", treeitem: "click", clickable: "click",
+  textbox: "type", searchbox: "type", combobox: "select", listbox: "select" };
+
+const TEXT_CHARS = 1200;
 
 function buildRequest(goal, page, history, values, maxOptions) {
   const els = shortlist(page.elements, goal, maxOptions || 240);
   const state = {
     goal,
     page: { title: page.title, url: page.url },
+    // visible page text: results/confirmations are usually not interactive, so the
+    // outline alone can't show that the goal was reached (real-Jev runs, 2026-10-22)
+    text: String(page.text || "").slice(0, TEXT_CHARS),
     headings: page.context.slice(0, 30),
     elements: els.map((e) => e.ref + " " + e.raw),
     history: history.slice(-12).map(histLine),
   };
   const questions = {
-    done: { type: "noul", instructions: "The goal in `goal` is already fully accomplished: `page`, `headings` and `elements` show its end result, so no further action is needed." },
+    done: { type: "noul", instructions: "The goal in `goal` is already fully accomplished: `text`, `headings` and `elements` show its end result, so no further action is needed." },
     kind: {
       type: "choice",
       instructions: "The kind of the next action that makes progress toward `goal` on this page, given what `history` already did.",
@@ -139,7 +148,7 @@ function buildRequest(goal, page, history, values, maxOptions) {
 // questions, so a model biased toward "yes" cannot pass both.
 function groundingQuestions() {
   return {
-    shows_result: { type: "noul", instructions: "The page in `page`, `headings` and `elements` visibly shows the END RESULT that `goal` asks for (a confirmation, the requested content, or the requested final state) — not merely a page where the goal could be started." },
+    shows_result: { type: "noul", instructions: "The page (`text`, `headings`, `elements`) visibly shows the END RESULT that `goal` asks for (a confirmation, the requested content, or the requested final state) — not merely a page where the goal could be started." },
     needs_action: { type: "noul", instructions: "Something still has to be clicked, typed or selected on this page to accomplish `goal`." },
   };
 }
@@ -225,6 +234,7 @@ async function runGoal(o) {
   const riskyConf = o.riskyConfidence != null ? o.riskyConfidence : 0.85;
   const doneAt = o.doneThreshold != null ? o.doneThreshold : 0.8;
   const doneFirstAt = o.doneFirstThreshold != null ? o.doneFirstThreshold : 0.95; // "done" with no action yet
+  const doneMaybe = o.doneMaybeThreshold != null ? o.doneMaybeThreshold : 0.5; // after acting: verify with grounding
   const maxWaits = o.maxWaits != null ? o.maxWaits : 5;
   const waitMs = o.waitMs != null ? o.waitMs : 800;
   const deadlineMs = o.deadlineMs || 120000;
@@ -233,9 +243,9 @@ async function runGoal(o) {
   const history = [], actions = [], steps = [];
   const t0 = Date.now();
   const deadline = t0 + deadlineMs;
-  let jevMs = 0, browserMs = 0, fallbacks = 0, lastSig = "", repeats = 0, waits = 0;
+  let jevMs = 0, browserMs = 0, fallbacks = 0, lastSig = "", repeats = 0, waits = 0, inputTokens = 0;
   const acted = () => actions.some((a) => a.kind !== "wait"); // waiting is not progress
-  const finish = (ok, reason, extra) => ({ ok, reason, goal, steps, actions, history, values, stats: { totalMs: Date.now() - t0, jevMs, browserMs, decisions: steps.length, fallbacks, waits }, ...(extra || {}) });
+  const finish = (ok, reason, extra) => ({ ok, reason, goal, steps, actions, history, values, stats: { totalMs: Date.now() - t0, jevMs, browserMs, decisions: steps.length, fallbacks, waits, inputTokens }, ...(extra || {}) });
 
   // resolve the node once per run (the client would otherwise ask the bus every marker)
   let node = o.node;
@@ -254,6 +264,7 @@ async function runGoal(o) {
   const ask = async (state, questions) => {
     const res = await jev.systemOne(state, questions, { deadline });
     jevMs += res.latencyMs || 0;
+    inputTokens += (res.usage && res.usage.input_tokens) || 0; // Jev bills input tokens only
     return res;
   };
   const succeed = async (reason) => {
@@ -271,6 +282,8 @@ async function runGoal(o) {
     const ol = await m("[OUTLINE" + tab + "]");
     if (ol.status !== "done") return finish(false, ol.reason || "outline_failed", { detail: ol.output });
     const page = parseOutline(ol.output);
+    const tx = await m("[DOM" + tab + "]");
+    if (tx.status === "done") page.text = String(tx.output).split("\n").slice(1).join("\n").replace(/\n{2,}/g, "\n").trim();
     const { state, questions, shown } = buildRequest(goal, page, history, values, o.maxOptions || jev.maxOptions);
     let res;
     try { res = await ask(state, questions); }
@@ -283,6 +296,15 @@ async function runGoal(o) {
     // "done" — trusted after real progress; before any action it needs a
     // stricter score AND a page-grounded check, else it is ignored
     let doneUnverified = false;
+    // after acting, a borderline "done" (doneMaybe ≤ p < doneAt) is settled by the
+    // page-grounded check — real Jev scores finished pages ≈0.5–0.75 here
+    if (acted() && A.done && A.done.noul >= doneMaybe && A.done.noul < doneAt) {
+      try {
+        const g = (await ask(state, groundingQuestions())).answers || {};
+        step.grounding = { shows_result: g.shows_result && g.shows_result.noul, needs_action: g.needs_action && g.needs_action.noul };
+        if (g.shows_result && g.needs_action && g.shows_result.noul >= doneAt && g.needs_action.noul < 0.5) return succeed("done");
+      } catch (e) { return finish(false, e.reason || "jev_error", { detail: e.message }); }
+    }
     if (A.done && A.done.noul >= doneAt) {
       if (acted()) return succeed("done");
       let grounded = false;
@@ -300,9 +322,22 @@ async function runGoal(o) {
 
     // Jev's decision
     let kind = A.kind && A.kind.choice;
-    const kConf = conf(A.kind);
+    let kConf = conf(A.kind);
     // a single option is no decision — its confidence is meaningless, treat as certain
     const tConf = A.target ? (shown.length === 1 ? 1 : conf(A.target)) : 0;
+    // kind torn but target clear: the target's role implies the kind (button → click,
+    // textbox → type, combobox → select); accept it if Jev ranked that kind in its top two
+    {
+      const tEl0 = shown.find((e) => e.ref === (A.target && A.target.choice));
+      const implied = tEl0 && ROLE_KIND[tEl0.role];
+      const probs = (A.kind && A.kind.probabilities) || {};
+      const top2 = Object.entries(probs).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k);
+      if (kConf < minConf && tConf >= 0.7 && implied && top2.includes(implied) && (probs[implied] || 0) >= 0.3) {
+        kind = implied;
+        kConf = Math.max(kConf, Math.min(tConf, (probs[implied] || 0) + 0.3));
+        step.kindFromRole = implied;
+      }
+    }
     let value = A.value ? values[Number(String(A.value.choice).slice(1))] : undefined;
     const vConf = A.value ? (Object.keys(questions.value.criteria).length === 1 ? 1 : conf(A.value)) : 0;
     let el = shown.find((e) => e.ref === (A.target && A.target.choice));
@@ -361,7 +396,7 @@ async function runGoal(o) {
     else r = await m("[FILL" + tab + "] " + el.ref + "\n" + value, MUTATING_TIMEOUT_MS);
     const ok = r.status === "done";
     const shownValue = needsValue ? (secret ? "(secret)" : value) : undefined;
-    history.push({ kind, label: el.role + " " + JSON.stringify(el.name), value: shownValue, result: ok ? "ok" : "failed:" + (r.reason || r.status) });
+    history.push({ kind, label: el.role + " " + JSON.stringify(el.name), value: shownValue, secret: !!(el.secret && needsValue), result: ok ? "ok" : "failed:" + (r.reason || r.status) });
     if (ok) {
       const a = { kind, role: el.role, name: el.name, nth: occurrence(page.elements, el) };
       if (needsValue) { if (secret) a.secret = true; else a.value = value; }

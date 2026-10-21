@@ -17,6 +17,11 @@
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
+// API keys (TYPESAFE_API_KEY, LAYA_API_KEY, …) from .env files — Node's built-in loader,
+// no dependency. Real environment variables win; repo .env, then ~/.webclaw/.env.
+for (const f of [path.join(__dirname, "..", ".env"), path.join(process.env.WEBCLAW_HOME || path.join(require("node:os").homedir(), ".webclaw"), ".env")]) {
+  try { if (fs.existsSync(f)) process.loadEnvFile(f); } catch (e) { process.stderr.write("webclaw: could not read " + f + ": " + e.message + "\n"); }
+}
 const crypto = require("node:crypto");
 const { loadConfig, saveHomeConfig, writeSecretFile, copySecretFile, HOME_CFG, EXT_CFG, REPO_DIR, STANDALONE_BUS, readJson } = require("../bridge/config.cjs");
 const { createClient } = require("../bridge/client.cjs");

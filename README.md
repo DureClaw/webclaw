@@ -260,6 +260,12 @@ the low end of the vendor's range); the LLM row is a real model:
 | modal (2) | 0.53 s · 3 | 29.6 s · 3 | — |
 | wizard (6) | 1.26 s · 7 | — | 0.15 s |
 
+**Real Jev (measured 2026-10-22, same 5 fixture tasks)** — jev-latest and jev-preview each completed
+**4/5** goals (≈1.0–1.1 s per task, ≈230 ms per decision, ≈16k input tokens ≈ $0.0007 for all five).
+Every action on all five tasks was correct; the one stop is the wizard, whose final page shows only a
+code with no confirmation text, so the grounded "done" check declined and the loop stopped
+(`low_confidence`) instead of claiming success. Results: `bench/results/brain-e2e-real-*.json`.
+
 **Laya (local, open source)** — `webclaw laya up` runs [Laya](https://github.com/NandhaKishorM/laya)'s
 `laya-serve` (same `/v1/systemone` protocol, Apache-2.0) on this Mac (MPS); `webclaw goal … --brain laya`
 keeps page content on the machine. Measured: ~0.16–0.7 s per decision, but the shipped checkpoints

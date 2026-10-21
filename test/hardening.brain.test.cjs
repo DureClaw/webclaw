@@ -375,3 +375,22 @@ test("recipe checks every arg before acting (no half-done page on a missing valu
   assert.equal(res.reason, "missing_arg");
   assert.equal(sent.filter((m) => /^\[CLICK|^\[FILL/.test(m)).length, 0, "no action ran before the arg check");
 });
+
+test("torn kind + clear target: the target's role decides (button → click)", async () => {
+  const { runGoal } = require("../bridge/brain/agent.cjs");
+  let n = 0;
+  const jev = { maxOptions: 240, systemOne: async (state, q) => {
+    n++;
+    if (n === 1) return { answers: {
+      done: { noul: 0.02 },
+      kind: { choice: "type", confidence: 0.01, probabilities: { click: 0.49, type: 0.5, select: 0, wait: 0, need_human: 0.01 } },
+      target: { choice: "@2", confidence: 0.81, probabilities: { "@1": 0.05, "@2": 0.95 } } } };
+    return { answers: { done: { noul: 0.97 }, kind: { choice: "wait", confidence: 0.9, probabilities: {} } } };
+  } };
+  const sent = [];
+  const page = { dispatch: async (mk) => { sent.push(mk); return mk.startsWith("[OUTLINE") ? { status: "done", output: 'P | http://p\nrefs: 2\n@1 textbox "Name" value="x"\n@2 button "Send"' } : { status: "done", output: "ok" }; } };
+  const r = await runGoal({ webclaw: page, jev, goal: "send it" });
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 300));
+  assert.ok(sent.includes("[CLICK] @2"), "button target → click, not type");
+  assert.equal(r.steps[0].kindFromRole, "click");
+});
