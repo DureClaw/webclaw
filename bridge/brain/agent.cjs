@@ -19,7 +19,9 @@
 
 const RISKY = /(결제|구매|주문|송금|이체|삭제|탈퇴|해지|환불|\bpay\b|payment|purchase|buy now|checkout|place order|transfer|delete|remove account|unsubscribe)/i;
 const STOP = new Set(["the", "a", "an", "to", "and", "or", "of", "in", "on", "with", "for", "as", "then", "it", "is", "be", "page", "into", "at", "my", "me", "please", "click", "type", "enter", "fill", "select", "open", "go"]);
-const KINDS = new Set(["click", "type", "select", "wait", "need_human", "done"]);
+const KINDS = new Set(["click", "type", "select", "scroll", "press_enter", "back", "wait", "need_human", "done"]);
+// page-level kinds act on the whole page — no target element, no value
+const PAGE_KINDS = new Set(["scroll", "press_enter", "back"]);
 // markers that act on the page may wait for a human approval (120 s) — give
 // them longer than that so a pending approval is never re-requested
 const MUTATING_TIMEOUT_MS = 150000;
@@ -88,6 +90,11 @@ function valueCandidates(goal) {
   // Latin/number tokens glued to Hangul ("alice로", "15인치")
   for (const m of goal.matchAll(/[A-Za-z0-9][\w.@+-]*(?=\p{Script=Hangul})|(?<=\p{Script=Hangul})[A-Za-z0-9][\w.@+-]*/gu)) add(m[0]);
   for (const m of goal.matchAll(/\b[A-Z]{2,}\b|\b\d[\d,.\-]*\b/g)) add(m[0]);
+  // English phrases a search box or filter usually wants: capitalized names ("Honda Civic"),
+  // money/units ("$15,000", "2 adults") and the words after for/in/near/from/to/under/with…
+  for (const m of goal.matchAll(/\$\s?\d[\d,.]*|\b\d[\d,.]*\s?(?:adults?|guests?|people|rooms?|nights?|miles?|mi|km|lbs?|kg|inch(?:es)?|"|GB|TB|stars?)\b/gi)) add(m[0]);
+  for (const m of goal.matchAll(/\b(?:[A-Z][\w'&.-]*)(?:\s+(?:[A-Z][\w'&.-]*|of|de|the|and|&)){0,4}(?:\s+[A-Z][\w'&.-]*)?/g)) if (!/^(Find|Search|Show|Get|Look|Book|Browse|Add|Open|Go|What|Which|How|Where|When|Who|I|The|A|An)$/.test(m[0])) add(m[0]);
+  for (const m of goal.matchAll(/\b(?:for|in|near|from|to|under|over|with|named|called|about|between)\s+((?:[\w$.,'&-]+\s?){1,4}?)(?=[,.;]|\s+(?:and|with|for|in|near|from|to|under|over|that|which|on|by|at)\b|$)/gi)) add(m[1]);
   return out.slice(0, 60);
 }
 
@@ -128,6 +135,9 @@ function buildRequest(goal, page, history, values, maxOptions) {
         click: "Click a button, link, tab, checkbox, radio button or menu item",
         type: "Type text into a text field (textbox or searchbox) that is empty or holds the wrong value",
         select: "Choose an option in a dropdown (combobox)",
+        scroll: "Scroll down: what the goal needs is probably further down this page (more results, filters, details)",
+        press_enter: "Press Enter to submit what was just typed (a search box or form with no visible submit button)",
+        back: "Go back to the previous page: this page is a wrong turn for the goal",
         wait: "Nothing to act on yet: the page is still loading or the expected content has not appeared",
         need_human: "Only the human can continue: credentials or data missing from `goal`, a CAPTCHA, a payment confirmation, or the goal is impossible here",
       },
@@ -200,6 +210,9 @@ function recipeScript(goal, actions, values) {
     else if (a.kind === "type") lines.push("await type(" + r + ", arg(" + JSON.stringify(a.arg) + "));");
     else if (a.kind === "select") lines.push("await fill(" + r + ", arg(" + JSON.stringify(a.arg) + "));");
     else if (a.kind === "wait") lines.push("await sleep(800);");
+    else if (a.kind === "scroll") lines.push("await js('window.scrollBy(0, Math.round(innerHeight * 0.8))');");
+    else if (a.kind === "press_enter") lines.push("await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }); await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }); await sleep(800);");
+    else if (a.kind === "back") lines.push("await js('history.back()'); await sleep(800);");
   }
   lines.push("return 'replayed " + actions.length + " step(s)';");
   for (const a of actions) delete a.arg;
@@ -349,7 +362,7 @@ async function runGoal(o) {
 
     if ((low || risky) && o.fallback) {
       // confidence-gated escalation: ask the slower brain for this one step
-      const fb = await o.fallback({ goal, page: state.page, elements: state.elements, history: state.history, values });
+      const fb = await o.fallback({ goal, page: state.page, text: state.text, elements: state.elements, history: state.history, values });
       fallbacks++;
       step.fallback = fb;
       if (fb && fb.kind === "done") {
@@ -376,11 +389,33 @@ async function runGoal(o) {
     step.source = source;
 
     if (kind === "wait") {
+      if (o.beforeAction) await o.beforeAction({ kind, url: page.url, decision: step });
       // waits have their own budget and do not count toward "stuck"
       if (++waits > maxWaits) return finish(false, "wait_budget", { detail: "waited " + maxWaits + "× and the page never changed enough to act" });
       await new Promise((r) => setTimeout(r, waitMs));
       history.push({ kind, label: "", result: "ok" });
       actions.push({ kind });
+      continue;
+    }
+
+    if (PAGE_KINDS.has(kind)) {
+      const sigP = kind + "|" + page.url;
+      repeats = sigP === lastSig ? repeats + 1 : 0;
+      lastSig = sigP;
+      if (repeats >= (kind === "scroll" ? 5 : 2)) return finish(false, "stuck", { detail: kind + " repeated without reaching the goal" });
+      if (o.beforeAction) await o.beforeAction({ kind, url: page.url, decision: step });
+      let rp;
+      if (kind === "scroll") rp = await m("[JS" + tab + "] window.scrollBy(0, Math.round(innerHeight * 0.8)); [scrollY, document.documentElement.scrollHeight]", MUTATING_TIMEOUT_MS);
+      else if (kind === "press_enter") {
+        rp = await m("[CDP" + tab + "] Input.dispatchKeyEvent " + JSON.stringify({ type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }), MUTATING_TIMEOUT_MS);
+        if (rp.status === "done") rp = await m("[CDP" + tab + "] Input.dispatchKeyEvent " + JSON.stringify({ type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }), MUTATING_TIMEOUT_MS);
+        await new Promise((res) => setTimeout(res, 800));
+      } else { rp = await m("[JS" + tab + "] history.back(); 'back'", MUTATING_TIMEOUT_MS); await new Promise((res) => setTimeout(res, 800)); }
+      const okP = rp.status === "done";
+      history.push({ kind, label: "page", result: okP ? "ok" : "failed:" + (rp.reason || rp.status) });
+      if (okP) actions.push({ kind });
+      if (o.afterAction) await o.afterAction({ kind, ok: okP, result: rp });
+      if (STOP_REASONS.has(rp.reason || "")) return finish(false, rp.reason, { detail: rp.output });
       continue;
     }
 
@@ -390,6 +425,7 @@ async function runGoal(o) {
     lastSig = sig;
     if (repeats >= 2) return finish(false, "stuck", { detail: "same action 3× without reaching the goal: " + kind + " " + el.role + " " + JSON.stringify(el.name) });
 
+    if (o.beforeAction) await o.beforeAction({ kind, el, value: secret ? undefined : value, secret, url: page.url, decision: step });
     let r;
     if (kind === "click") r = await m("[CLICK" + tab + "] " + el.ref, MUTATING_TIMEOUT_MS);
     else if (kind === "type") r = await m("[TYPE" + tab + "] " + el.ref + "\n" + value, MUTATING_TIMEOUT_MS);
@@ -402,6 +438,7 @@ async function runGoal(o) {
       if (needsValue) { if (secret) a.secret = true; else a.value = value; }
       actions.push(a);
     }
+    if (o.afterAction) await o.afterAction({ kind, ok, result: r });
     const why = r.reason || (r.status === "timeout" ? "timeout" : "");
     if (STOP_REASONS.has(why)) return finish(false, why, { detail: r.output });
   }
@@ -419,7 +456,8 @@ function llmFallback(brainUrl, brainToken) {
       "Page: " + s.page.title + " | " + s.page.url,
       "Elements:", ...s.elements.slice(0, 200),
       "History:", ...(s.history.length ? s.history : ["(none)"]),
-      'Reply with ONLY JSON: {"kind":"click|type|select|wait|need_human|done","target":"@N","value":"text to type or option"}',
+      ...(s.text ? ["Page text (excerpt):", s.text] : []),
+      'Reply with ONLY JSON: {"kind":"click|type|select|scroll|press_enter|back|wait|need_human|done","target":"@N","value":"text to type or option"} (target only for click/type/select, value only for type/select)',
     ].join("\n");
     const h = { "content-type": "application/json", "x-webclaw-brain-depth": "1" };
     if (brainToken) h.authorization = "Bearer " + brainToken;

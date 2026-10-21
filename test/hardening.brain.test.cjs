@@ -394,3 +394,28 @@ test("torn kind + clear target: the target's role decides (button → click)", a
   assert.ok(sent.includes("[CLICK] @2"), "button target → click, not type");
   assert.equal(r.steps[0].kindFromRole, "click");
 });
+
+test("page-level kinds (scroll / press_enter / back) run without a target and hit the hooks", async () => {
+  const { runGoal } = require("../bridge/brain/agent.cjs");
+  const seq = ["scroll", "press_enter", "back"];
+  let n = 0;
+  const jev = { maxOptions: 240, systemOne: async () => {
+    const k = seq[n++];
+    if (!k) return { answers: { done: { noul: 0.97 }, kind: { choice: "wait", confidence: 0.9, probabilities: {} } } };
+    return { answers: { done: { noul: 0.02 }, kind: { choice: k, confidence: 0.95, probabilities: { [k]: 0.97 } } } };
+  } };
+  const sent = [], hooks = [];
+  const page = { dispatch: async (mk) => { sent.push(mk); return mk.startsWith("[OUTLINE") ? { status: "done", output: 'P | http://p\nrefs: 1\n@1 link "More"' } : { status: "done", output: "ok" }; } };
+  const r = await runGoal({ webclaw: page, jev, goal: "x", beforeAction: async (a) => hooks.push(a.kind) });
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 300));
+  assert.ok(sent.some((m) => /^\[JS\] window\.scrollBy/.test(m)));
+  assert.ok(sent.some((m) => /^\[CDP\] Input\.dispatchKeyEvent .*keyDown/.test(m)));
+  assert.ok(sent.some((m) => /^\[JS\] history\.back\(\)/.test(m)));
+  assert.deepEqual(hooks, ["scroll", "press_enter", "back"]);
+});
+
+test("English value candidates: names, money, units, phrases after prepositions", () => {
+  const { valueCandidates } = require("../bridge/brain/agent.cjs");
+  const v = valueCandidates("Find a used Honda Civic under $15,000 near 10001 for 2 adults in New York");
+  for (const x of ["Honda Civic", "$15,000", "10001", "2 adults", "New York"]) assert.ok(v.includes(x), x + " in " + JSON.stringify(v));
+});
