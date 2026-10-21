@@ -26,29 +26,56 @@ function createJev(opts = {}) {
   const extraBody = Object.assign({}, P.extraBody || {}, opts.extraBody || {});
   const maxOptions = opts.maxOptions || P.maxOptions;
 
+  const retryBaseMs = opts.retryBaseMs != null ? opts.retryBaseMs : 300;
+  const maxRetryAfterMs = opts.maxRetryAfterMs != null ? opts.maxRetryAfterMs : 10000;
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  // exponential backoff with a little jitter
+  const backoff = (attempt) => retryBaseMs * 2 ** attempt + Math.floor(Math.random() * retryBaseMs / 2);
+  // Retry-After: seconds or an HTTP date
+  const retryAfter = (h) => {
+    if (!h) return 0;
+    const n = Number(h);
+    if (Number.isFinite(n)) return Math.max(0, n * 1000);
+    const d = Date.parse(h);
+    return Number.isFinite(d) ? Math.max(0, d - Date.now()) : 0;
+  };
+
+  // extra.deadline (epoch ms): the whole call — retries included — ends by then
   async function systemOne(state, questions, extra = {}) {
     if (!apiKey) throw Object.assign(new Error("no " + provider + " API key — set " + P.keyEnv + " or brain.apiKey in ~/.webclaw/config.json"), { reason: "no_api_key" });
     const headers = { authorization: "Bearer " + apiKey, "content-type": "application/json" };
     if (extra.longContext) headers["TypeSafe-Danger-Zone-Long-Context"] = "true";
     const body = JSON.stringify(Object.assign({ model, state, questions }, extraBody));
+    const deadline = extra.deadline || Infinity;
+    const left = () => deadline - Date.now();
+    const pastDeadline = () => Object.assign(new Error(provider + ": goal deadline reached"), { reason: "deadline" });
     for (let attempt = 0; ; attempt++) {
+      if (left() <= 0) throw pastDeadline();
       const t0 = Date.now();
       let r;
-      try { r = await fetch(baseUrl + "/v1/systemone", { method: "POST", headers, body, signal: AbortSignal.timeout(timeoutMs) }); }
+      try { r = await fetch(baseUrl + "/v1/systemone", { method: "POST", headers, body, signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, left()))) }); }
       catch (e) {
-        if (attempt < 2) continue;
-        throw Object.assign(new Error(provider + " unreachable at " + baseUrl + ": " + e.message + (P.local ? " — start it with `webclaw laya up`" : "")), { reason: "jev_unreachable" });
+        // network error or per-request timeout → back off and retry
+        if (attempt < 3 && left() > backoff(attempt)) { await sleep(backoff(attempt)); continue; }
+        if (left() <= 0) throw pastDeadline();
+        const to = e && (e.name === "TimeoutError" || e.name === "AbortError");
+        throw Object.assign(new Error(provider + (to ? " timed out" : " unreachable") + " at " + baseUrl + ": " + e.message + (P.local ? " — start it with `webclaw laya up`" : "")), { reason: to ? "jev_timeout" : "jev_unreachable" });
       }
-      if (r.status === 429 || r.status >= 500) {
-        if (attempt < 3) {
-          const ra = Number(r.headers.get("retry-after"));
-          await new Promise((res) => setTimeout(res, ra > 0 ? ra * 1000 : 300 * 2 ** attempt));
+      if ((r.status === 429 || r.status >= 500) && attempt < 3) {
+        const wait = Math.min(maxRetryAfterMs, retryAfter(r.headers.get("retry-after")) || backoff(attempt));
+        if (left() > wait) {
+          try { await r.body?.cancel(); } catch (e) {}
+          await sleep(wait);
           continue;
         }
       }
       const text = await r.text();
-      if (!r.ok) throw Object.assign(new Error(provider + " HTTP " + r.status + ": " + text.slice(0, 300)), { reason: r.status === 401 ? "jev_unauthorized" : "jev_error" });
-      const j = JSON.parse(text);
+      if (!r.ok) throw Object.assign(new Error(provider + " HTTP " + r.status + ": " + text.slice(0, 300)), { reason: r.status === 401 ? "jev_unauthorized" : r.status === 429 ? "jev_rate_limited" : "jev_error" });
+      let j;
+      try { j = JSON.parse(text); } catch (e) { j = null; }
+      if (!j || typeof j !== "object" || typeof j.answers !== "object" || j.answers === null) {
+        throw Object.assign(new Error(provider + " returned a non-System-One response: " + text.slice(0, 200)), { reason: "jev_bad_response" });
+      }
       j.latencyMs = Date.now() - t0;
       return j;
     }

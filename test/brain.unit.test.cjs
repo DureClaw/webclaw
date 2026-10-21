@@ -41,10 +41,15 @@ function fakeLogin() {
 }
 
 test("parseOutline / valueCandidates / shortlist", () => {
-  const p = parseOutline('T | http://u\nrefs: 2\n# Head\n@1 textbox "Name" value="x"\n@2 button "Go \\"now\\""\n== frame http://f');
+  // refs.js format: `@N <role> <JSON.stringify(name)><suffixes>`
+  const line2 = "@2 button " + JSON.stringify('Go "now" \\ x') + " (disabled)";
+  const p = parseOutline('T | http://u\nrefs: 3\n# Head\n@1 textbox "Name" value="x"\n' + line2 + '\n@3 textbox "PW" type=password\n== frame http://f');
   assert.equal(p.title, "T");
-  assert.deepEqual(p.elements.map((e) => e.ref), ["@1", "@2"]);
-  assert.equal(p.elements[1].name, 'Go \\"now\\"');
+  assert.deepEqual(p.elements.map((e) => e.ref), ["@1", "@2", "@3"]);
+  assert.equal(p.elements[1].name, 'Go "now" \\ x');
+  assert.equal(p.elements[1].raw, line2.slice(3));
+  assert.deepEqual(p.elements.map((e) => e.secret), [false, false, true]);
+  assert.equal(parseOutline('T | u\nrefs: 1\n@1 button "C:\\x"').elements[0].name, "C:\\x", "invalid JSON escape → tolerant fallback");
   assert.deepEqual(p.context, ["# Head", "== frame http://f"]);
   const v = valueCandidates('Sign up as bob@x.io, country KR, plan "Pro plan" and pay 1,200');
   for (const x of ["Pro plan", "bob@x.io", "KR", "1,200"]) assert.ok(v.includes(x), x + " in " + JSON.stringify(v));
@@ -72,13 +77,17 @@ test("runGoal reaches the goal: 3 actions, done detected, recipe saved", async (
   assert.equal(r.ok, true, JSON.stringify(r).slice(0, 400));
   assert.equal(r.reason, "done");
   assert.equal(page.st.in, true);
-  assert.deepEqual(r.actions.map((a) => a.kind + ":" + a.name + (a.value ? "=" + a.value : "")), ["type:Username=alice", "type:Password=s3cret", "click:Sign in"]);
+  assert.deepEqual(r.actions.map((a) => a.kind + ":" + a.name + (a.value ? "=" + a.value : "")), ["type:Username=alice", "type:Password", "click:Sign in"]);
+  assert.equal(r.actions[1].secret, true, "password value is never recorded");
+  assert.ok(!JSON.stringify(r.history).includes("s3cret"));
   assert.equal(r.stats.decisions, 4, "3 acting decisions + 1 'done'");
   assert.equal(r.saved, "x/login");
   const learn = page.sent.find((s) => s.startsWith("[LEARN] x\n"));
   const script = JSON.parse(learn.slice(learn.indexOf("\n") + 1)).recipes.login;
-  assert.match(script, /await type\(await ref\("textbox", "Username"\), "alice"\);/);
-  assert.match(script, /await click\(await ref\("button", "Sign in"\)\);/);
+  assert.match(script, /await type\(await ref\("textbox", "Username", 0\), arg\("v1"\)\);/);
+  assert.match(script, /await type\(await ref\("textbox", "Password", 0\), arg\("password"\)\);/);
+  assert.match(script, /await click\(await ref\("button", "Sign in", 0\)\);/);
+  assert.ok(!script.includes("s3cret") && !script.includes('"alice"'), "no typed values in the recipe");
 });
 
 test("low confidence stops (or escalates to the fallback brain)", async () => {
@@ -120,12 +129,14 @@ test("Jev client: bad key → jev_unauthorized; missing key → no_api_key", asy
 test("brain server: HUD prompt → goal + tab, runs the loop, answers /brain/exec", async () => {
   assert.deepEqual(goalFromPrompt("You drive a browser…\nCurrent tab: http://127.0.0.1:4801/login.html?x=1\nUser: " + GOAL), { goal: GOAL, tab: "127.0.0.1:4801/login.html" });
   assert.deepEqual(goalFromPrompt("Site notes for a.com:\n- n\n\nfind the price"), { goal: "find the price", tab: "" });
+  assert.deepEqual(goalFromPrompt("Site notes for a.com:\n- n\n\nfind the price\n\nthen add it to the cart"), { goal: "find the price\n\nthen add it to the cart", tab: "" }, "only the notes block is stripped");
+  assert.equal(goalFromPrompt("User: open the docs\nAssistant: done\nUser: now click Pricing").goal, "now click Pricing", "last User: turn");
   const page = fakeLogin();
   const srv = createBrainServer({ webclaw: page, jev, token: "tok" });
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   const url = "http://127.0.0.1:" + srv.address().port + "/brain/exec";
-  assert.equal((await fetch(url, { method: "POST", body: "{}" })).status, 401);
-  const j = await (await fetch(url, { method: "POST", headers: { authorization: "Bearer tok" }, body: JSON.stringify({ prompt: "Current tab: http://x/login\nUser: " + GOAL }) })).json();
+  assert.equal((await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
+  const j = await (await fetch(url, { method: "POST", headers: { authorization: "Bearer tok", "content-type": "application/json" }, body: JSON.stringify({ mode: "goal", prompt: "Current tab: http://x/login\nUser: " + GOAL }) })).json();
   assert.match(j.output, /^✅ 완료 — 4번 판단, 3개 동작/);
   assert.equal(page.st.in, true);
   srv.close();
@@ -133,6 +144,8 @@ test("brain server: HUD prompt → goal + tab, runs the loop, answers /brain/exe
 
 test("recipeScript replays by role+name (no refs, no model)", () => {
   const s = recipeScript("g", [{ kind: "select", role: "combobox", name: "Country", value: "KR" }, { kind: "wait" }]);
-  assert.match(s, /await fill\(await ref\("combobox", "Country"\), "KR"\);/);
+  assert.match(s, /await fill\(await ref\("combobox", "Country", 0\), arg\("v1"\)\);/);
+  assert.match(s, /args\.v1 → combobox "Country"/);
+  assert.ok(!s.includes('"KR"'));
   assert.match(s, /await sleep\(800\);/);
 });
