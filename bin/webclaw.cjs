@@ -12,19 +12,61 @@
 //   webclaw audit|rec|replay|policy|identity|webmcp|learnings|cdp-url   (v0.9.0)
 //   webclaw goal "<goal>" · webclaw brain   System One brain (TypeSafe Jev)   (v0.10.0)
 // Common flags: --node <name>  --timeout <s>  --json
+// Flags are declared: VALUE_FLAGS take the next argument (or --name=value);
+// every other --flag is boolean and never swallows a positional.
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { loadConfig, saveHomeConfig, HOME_CFG, EXT_CFG, REPO_DIR, STANDALONE_BUS, readJson } = require("../bridge/config.cjs");
+const { loadConfig, saveHomeConfig, writeSecretFile, copySecretFile, HOME_CFG, EXT_CFG, REPO_DIR, STANDALONE_BUS, readJson } = require("../bridge/config.cjs");
 const { createClient } = require("../bridge/client.cjs");
 const { createMcpServer, VERSION } = require("../bridge/mcp.cjs");
 const { ensureMiniBus, stopMiniBus, healthy, LOG_FILE } = require("../bridge/daemon.cjs");
 
-const argv = process.argv.slice(2);
-const cmd = argv[0];
-const flag = (name) => { const i = argv.indexOf("--" + name); return i >= 0 ? (argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : true) : undefined; };
-const positional = argv.slice(1).filter((a, i, arr) => !a.startsWith("--") && !(i > 0 && arr[i - 1].startsWith("--") && ["node", "timeout", "since", "ext-dir", "tab", "max-steps", "min-confidence", "save", "port", "brain"].includes(arr[i - 1].slice(2))));
+const VALUE_FLAGS = new Set(["node", "timeout", "since", "ext-dir", "tab", "max-steps", "min-confidence", "save", "port", "brain"]);
+
+// argv → { cmd, positional, flags }. Pure (unit-tested). "--" ends flag parsing.
+function parseArgs(args) {
+  const flags = {}, pos = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") { pos.push(...args.slice(i + 1)); break; }
+    if (a.startsWith("--") && a.length > 2) {
+      const eq = a.indexOf("=");
+      const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
+      if (eq > 0) { flags[name] = a.slice(eq + 1); continue; }
+      if (VALUE_FLAGS.has(name)) {
+        const v = args[i + 1];
+        if (v === undefined || v.startsWith("--")) throw new Error("--" + name + " needs a value");
+        flags[name] = v; i++;
+      } else flags[name] = true;
+      continue;
+    }
+    pos.push(a);
+  }
+  return { cmd: pos[0], positional: pos.slice(1), flags };
+}
+
+// is url the local System One brain server itself (→ --fallback would recurse)?
+function isSelfBrain(url, port) {
+  let u;
+  try { u = new URL(url); } catch (e) { return false; }
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  const local = ["localhost", "::1", "0.0.0.0", "::"].includes(host) || /^127\./.test(host);
+  const p = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+  return local && p === Number(port);
+}
+
+// the LLM brain behind --fallback: config brain.fallbackUrl, never ourselves
+function resolveFallback(cfg, port) {
+  const url = (cfg.brain && cfg.brain.fallbackUrl) || "";
+  if (!url) throw new Error("--fallback needs an LLM brain: set \"brain\": {\"fallbackUrl\": \"http://…\", \"fallbackToken\": \"…\"} in " + HOME_CFG + " (or WEBCLAW_BRAIN_FALLBACK_URL)");
+  if (isSelfBrain(url, port)) throw new Error("refusing --fallback: brain.fallbackUrl " + url + " is this System One brain server (http://127.0.0.1:" + port + ") — it would call itself");
+  return { url, token: (cfg.brain && cfg.brain.fallbackToken) || "" };
+}
+
+let cmd, positional = [], flags = {};
+const flag = (name) => flags[name];
 
 function die(msg, code = 1) { process.stderr.write(msg + "\n"); process.exit(code); }
 
@@ -35,11 +77,12 @@ async function prepared() {
   return { cfg, client: createClient(cfg) };
 }
 
+// result → stdout (or stderr on failure); exit code 1 whenever status !== done, --json included
 function print(r) {
+  if (r.status !== "done") process.exitCode = 1;
   if (flag("json")) return console.log(JSON.stringify(r));
   if (r.status === "done") return console.log(r.output);
   process.stderr.write("[" + (r.reason || r.status) + "] " + r.output + "\n");
-  process.exit(1);
 }
 
 async function main() {
@@ -47,7 +90,8 @@ async function main() {
     const cfg = loadConfig();
     if (!cfg.secret) die("no secret configured — run: webclaw setup --standalone");
     const { createMiniBus } = require("../bridge/minibus.cjs");
-    const bus = createMiniBus({ secret: cfg.secret, workKey: cfg.workKey, version: VERSION, registryFile: require("node:path").join(require("../bridge/config.cjs").HOME_DIR, "registry.json"), log: (m) => console.log(new Date().toISOString() + " " + m) });
+    const allowRemote = !!flag("allow-remote") || process.env.WEBCLAW_ALLOW_REMOTE === "1";
+    const bus = createMiniBus({ secret: cfg.secret, workKey: cfg.workKey, version: VERSION, allowRemote, registryFile: require("node:path").join(require("../bridge/config.cjs").HOME_DIR, "registry.json"), log: (m) => console.log(new Date().toISOString() + " " + m) });
     const [host, port] = (cfg.mode === "standalone" ? cfg.bus : STANDALONE_BUS).split(":");
     const p = await bus.listen(Number(port), host);
     console.log("webclaw mini-bus listening on " + host + ":" + p + " (work key " + cfg.workKey + ")");
@@ -87,22 +131,46 @@ async function main() {
   if (cmd === "setup") {
     const standalone = !!flag("standalone");
     const current = readJson(HOME_CFG);
+    const newToken = () => crypto.randomBytes(24).toString("base64url");
+    // the extension config: --ext-dir <dir> (unpacked extension elsewhere) or this repo
+    const extDir = typeof flag("ext-dir") === "string" ? flag("ext-dir") : REPO_DIR;
+    const extCfg = path.join(extDir, "config.local.json");
+    const extNow = readJson(extCfg);
+    // keep the user's brain/Jev settings across --force
+    const keep = current ? Object.fromEntries(["jev", "brain", "node"].filter((k) => current[k] !== undefined).map((k) => [k, current[k]])) : {};
+    // write the extension config, backing up the old one (both 0600)
+    const writeExt = (obj) => {
+      if (fs.existsSync(extCfg)) copySecretFile(extCfg, extCfg + ".bak-" + Date.now());
+      writeSecretFile(extCfg, JSON.stringify(obj, null, 2) + "\n");
+    };
     if (current && !flag("force")) {
+      if (!current.brainToken) {
+        current.brainToken = (extNow && extNow.brainToken) || newToken();
+        saveHomeConfig(current);
+        console.log("brain token generated → " + HOME_CFG);
+      }
+      if (current.mode === "standalone" && extNow && extNow.brainToken !== current.brainToken) {
+        writeExt(Object.assign({}, extNow, { brainToken: current.brainToken }));
+        console.log("brain token written → " + extCfg);
+      }
+      if (fs.existsSync(extCfg)) fs.chmodSync(extCfg, 0o600);
+      fs.chmodSync(HOME_CFG, 0o600);
       console.log("already configured (" + HOME_CFG + ", mode " + current.mode + ") — use --force to redo");
     } else if (standalone) {
-      const cfg = { mode: "standalone", bus: process.env.WEBCLAW_BUS || STANDALONE_BUS, secret: (current && current.secret) || crypto.randomBytes(24).toString("base64url"), workKey: "WK-local" };
+      const brainToken = (current && current.brainToken) || newToken();
+      const cfg = Object.assign(keep, { mode: "standalone", bus: process.env.WEBCLAW_BUS || STANDALONE_BUS, secret: (current && current.secret) || crypto.randomBytes(24).toString("base64url"), workKey: "WK-local", brainToken });
       saveHomeConfig(cfg);
       // point the unpacked extension at the mini-bus (keep a backup of the old config)
-      const extDir = typeof flag("ext-dir") === "string" ? flag("ext-dir") : REPO_DIR;
-      const extCfg = path.join(extDir, "config.local.json");
-      if (fs.existsSync(extCfg)) fs.copyFileSync(extCfg, extCfg + ".bak-" + Date.now());
-      fs.writeFileSync(extCfg, JSON.stringify({ bus: cfg.bus, secret: cfg.secret, workKey: cfg.workKey, name: "webclaw@local", role: "executor" }, null, 2) + "\n", { mode: 0o600 });
+      writeExt({ bus: cfg.bus, secret: cfg.secret, workKey: cfg.workKey, name: "webclaw@local", role: "executor", brainToken });
       console.log("standalone mode configured → " + HOME_CFG + "\nextension config written → " + extCfg);
     } else {
-      const ext = readJson(EXT_CFG);
-      if (!ext || !ext.bus) die("bus mode needs " + EXT_CFG + " (bus/secret/workKey) — or use --standalone");
-      saveHomeConfig({ mode: "bus", bus: ext.bus, secret: ext.secret, workKey: ext.workKey });
-      console.log("bus mode configured from " + EXT_CFG + " → " + HOME_CFG);
+      const ext = extNow;
+      if (!ext || !ext.bus) die("bus mode needs " + extCfg + " (bus/secret/workKey) — or use --standalone");
+      const brainToken = (current && current.brainToken) || ext.brainToken || newToken();
+      saveHomeConfig(Object.assign(keep, { mode: "bus", bus: ext.bus, secret: ext.secret, workKey: ext.workKey, brainToken }));
+      fs.chmodSync(extCfg, 0o600);
+      console.log("bus mode configured from " + extCfg + " → " + HOME_CFG);
+      if (ext.brainToken !== brainToken) console.log("brain token stored in " + HOME_CFG + " — if you run `webclaw brain`, enter it as the extension's Brain Token");
     }
     const bin = path.join(REPO_DIR, "bin", "webclaw.cjs");
     console.log([
@@ -155,6 +223,8 @@ async function main() {
     } catch (e) { step(false, "round-trip", e.message); process.exit(1); }
   }
 
+  if (!cmd) usage();
+  if (cmd === "brain" && !loadConfig().brainToken && !flag("insecure-no-token")) die("refusing to start the brain without a token — run `webclaw setup` (it generates brainToken) or pass --insecure-no-token");
   const { client } = await prepared();
   const node = typeof flag("node") === "string" ? flag("node") : undefined;
   const timeoutMs = flag("timeout") ? Number(flag("timeout")) * 1000 : undefined;
@@ -182,7 +252,7 @@ async function main() {
     const r = await runGoalWith(cfg, client, {
       goal, tab: typeof flag("tab") === "string" ? flag("tab") : "", maxSteps: Number(flag("max-steps")) || undefined,
       minConfidence: flag("min-confidence") ? Number(flag("min-confidence")) : undefined, save: typeof flag("save") === "string" ? flag("save") : undefined,
-      fallback: !!flag("fallback"), onStep: flag("json") ? undefined : (st) => process.stderr.write("  step " + st.i + "  done=" + (st.done != null ? st.done.toFixed(2) : "—") + "  kind[" + st.kind + "]  target[" + st.target + "]" + (st.value ? "  value[" + st.value + "]" : "") + "  (" + st.jevMs + "ms)\n"),
+      node, brainPort: Number(flag("port")) || 4111, fallback: !!flag("fallback"), onStep: flag("json") ? undefined : (st) => process.stderr.write("  step " + st.i + "  done=" + (st.done != null ? st.done.toFixed(2) : "—") + "  kind[" + st.kind + "]  target[" + st.target + "]" + (st.value ? "  value[" + st.value + "]" : "") + "  (" + st.jevMs + "ms)\n"),
     });
     if (flag("json")) console.log(JSON.stringify(r));
     else console.log(require("../bridge/brain/server.cjs").summarize(r));
@@ -196,8 +266,12 @@ async function main() {
     const provider = typeof flag("brain") === "string" ? flag("brain") : (cfg.jev && cfg.jev.provider);
     const jev = createJev(Object.assign({}, cfg.jev, provider ? { provider } : {}));
     const port = Number(flag("port")) || 4111;
-    const srv = createBrainServer({ webclaw: client, jev, token: cfg.brainToken || "", log: (m) => console.log(new Date().toISOString() + " " + m),
-      defaults: flag("fallback") && cfg.brainUrl ? { fallback: require("../bridge/brain/agent.cjs").llmFallback(cfg.brainUrl, cfg.brainToken) } : {} });
+    const token = cfg.brainToken || "";
+    if (!token) process.stderr.write("WARNING: brain server without a token — any local process or web page can drive your browser\n");
+    const fb = flag("fallback") ? resolveFallback(cfg, port) : null;
+    const webclaw = node ? { dispatch: (mk, op) => client.dispatch(mk, Object.assign({ node }, op)) } : client;
+    const srv = createBrainServer({ webclaw, jev, token, log: (m) => console.log(new Date().toISOString() + " " + m),
+      defaults: fb ? { fallback: require("../bridge/brain/agent.cjs").llmFallback(fb.url, fb.token) } : {} });
     await new Promise((r) => srv.listen(port, "127.0.0.1", r));
     console.log("webclaw System One brain on http://127.0.0.1:" + port + "/brain/exec (model " + jev.model + (jev.hasKey ? "" : ", NO API KEY") + ") — set it as the extension's Brain URL");
     await new Promise(() => {});
@@ -242,19 +316,25 @@ async function main() {
   if (cmd === "cdp-url") {
     const { cfg } = await prepared();
     if (cfg.mode !== "standalone") die("the CDP endpoint lives on the local mini-bus — standalone mode only (webclaw setup --standalone)");
-    return console.log("http://" + cfg.bus + "/cdp/" + encodeURIComponent(cfg.secret) + (node ? "?node=" + encodeURIComponent(node) : ""));
+    // a CDP-only token derived from the secret — the master secret never goes into a URL
+    const { cdpToken } = require("../bridge/minibus.cjs");
+    return console.log("http://" + cfg.bus + "/cdp/" + cdpToken(cfg.secret) + (node ? "?node=" + encodeURIComponent(node) : ""));
   }
   if (cmd === "inbox") {
     const since = flag("since") ? Number(flag("since")) : undefined;
     return console.log(JSON.stringify(await client.inbox(node, since), null, 1));
   }
+  usage();
+}
+
+function usage() {
   die([
     "webclaw " + VERSION + " — drive your real Chrome from any agent",
     "  setup [--standalone] · doctor · nodes · do \"<marker>\" · run <file|-> [--tab <t>] · inbox · mcp · serve|up|down",
     "  audit [n] · rec on|off|status · replay [path] · policy · identity [init] · webmcp list|call <tool> [json]",
     "  learnings export [file]|import <file>|push [name]|pull [name] · cdp-url",
-    "  goal \"<goal>\" [--brain jev|laya] [--tab t] [--save d/n] [--fallback] · brain [--port 4111] · laya up|down|status",
-    "  flags: --node <name> --timeout <s> --json",
+    "  goal \"<goal>\" [--brain jev|laya] [--tab t] [--save d/n] [--fallback] · brain [--port 4111] [--fallback] [--insecure-no-token] · laya up|down|status",
+    "  serve [--allow-remote] · flags: --node <name> --timeout <s> --json",
   ].join("\n"), cmd ? 1 : 0);
 }
 
@@ -266,9 +346,16 @@ async function runGoalWith(cfg, client, o) {
   const { createJev } = require("../bridge/brain/jev.cjs");
   const provider = typeof flag("brain") === "string" ? flag("brain") : (cfg.jev && cfg.jev.provider);
   const jev = createJev(Object.assign({}, cfg.jev, provider ? { provider } : {}));
-  const fallback = o.fallback && cfg.brainUrl ? llmFallback(cfg.brainUrl, cfg.brainToken) : undefined;
+  const fb = o.fallback ? resolveFallback(cfg, o.brainPort || 4111) : null;
+  const fallback = fb ? llmFallback(fb.url, fb.token) : undefined;
   const webclaw = o.node ? { dispatch: (mk, op) => client.dispatch(mk, Object.assign({ node: o.node }, op)) } : client;
   return runGoal(Object.assign({}, o, { webclaw, jev, fallback }));
 }
 
-main().then(() => { if (cmd !== "serve" && cmd !== "mcp") process.exit(process.exitCode || 0); }, (e) => die(String((e && e.message) || e)));
+module.exports = { parseArgs, isSelfBrain, resolveFallback, VALUE_FLAGS };
+
+if (require.main === module) {
+  try { ({ cmd, positional, flags } = parseArgs(process.argv.slice(2))); } catch (e) { die(e.message); }
+  // flush stdout before exiting (pipes are async on macOS; results can be MBs)
+  main().then(() => { if (cmd !== "serve" && cmd !== "mcp") process.stdout.write("", () => process.exit(process.exitCode || 0)); }, (e) => die(String((e && e.message) || e)));
+}

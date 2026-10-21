@@ -94,10 +94,12 @@ function createMcpServer(client, opts = {}) {
   }
 
   // one JSON-RPC message → response object (or null for notifications)
-  async function handle(msg) {
-    const { id, method, params } = msg || {};
+  async function handleOne(msg) {
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } };
+    const { id, method, params } = msg;
     const ok = (result) => (id === undefined ? null : { jsonrpc: "2.0", id, result });
     const err = (code, message) => (id === undefined ? null : { jsonrpc: "2.0", id, error: { code, message } });
+    if (typeof method !== "string") return { jsonrpc: "2.0", id: id === undefined ? null : id, error: { code: -32600, message: "invalid request: method must be a string" } };
     if (method === "initialize") {
       const want = params && params.protocolVersion;
       return ok({
@@ -114,31 +116,57 @@ function createMcpServer(client, opts = {}) {
         const text = await callTool(params && params.name, params && params.arguments);
         return ok({ content: [{ type: "text", text: cap(String(text)) }] });
       } catch (e) {
-        if (e.code === -32602) return err(-32602, e.message);
-        return ok({ content: [{ type: "text", text: cap(String(e.message || e)) }], isError: true });
+        if (e && e.code === -32602) return err(-32602, e.message);
+        return ok({ content: [{ type: "text", text: cap(String((e && e.message) || e)) }], isError: true });
       }
     }
-    if (method && method.startsWith("notifications/")) return null;
+    if (method.startsWith("notifications/")) return null;
     return err(-32601, "method not found: " + method);
   }
 
-  // newline-delimited JSON-RPC over stdio; logs go to stderr only
-  function serveStdio(input = process.stdin, output = process.stdout) {
+  // single message or JSON-RPC batch (array → array of responses, or null when
+  // all were notifications; an empty batch is itself an invalid request)
+  async function handle(msg) {
+    const safe = (m) => Promise.resolve().then(() => handleOne(m)).catch((e) =>
+      ({ jsonrpc: "2.0", id: m && typeof m === "object" && m.id !== undefined ? m.id : null, error: { code: -32603, message: "internal error: " + String((e && e.message) || e) } }));
+    if (!Array.isArray(msg)) return safe(msg);
+    if (!msg.length) return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request: empty batch" } };
+    const out = (await Promise.all(msg.map(safe))).filter(Boolean);
+    return out.length ? out : null;
+  }
+
+  // newline-delimited JSON-RPC over stdio; logs go to stderr only. On stdin
+  // end, in-flight requests are answered before the process exits.
+  function serveStdio(input = process.stdin, output = process.stdout, onDone) {
     let buf = "";
+    const inflight = new Set();
+    const write = (res) => { try { output.write(JSON.stringify(res) + "\n"); } catch (e) {} };
     input.setEncoding("utf8");
+    const line1 = (line) => {
+      if (!line) return;
+      let msg;
+      try { msg = JSON.parse(line); } catch (e) { return write({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }); }
+      const p = handle(msg)
+        .then((res) => { if (res) write(res); })
+        .catch((e) => write({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "internal error: " + String((e && e.message) || e) } }))
+        .finally(() => inflight.delete(p));
+      inflight.add(p);
+    };
     input.on("data", (chunk) => {
       buf += chunk;
       let nl;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
-        if (!line) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch (e) { output.write(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }) + "\n"); continue; }
-        Promise.resolve(handle(msg)).then((res) => { if (res) output.write(JSON.stringify(res) + "\n"); });
+        line1(line);
       }
     });
-    input.on("end", () => process.exit(0));
+    input.on("end", async () => {
+      line1(buf.trim()); buf = ""; // a last line without a trailing newline
+      while (inflight.size) await Promise.allSettled([...inflight]);
+      if (onDone) return onDone();
+      output.write("", () => process.exit(0)); // flush first (pipes are async on macOS)
+    });
   }
 
   return { handle, serveStdio, callTool };

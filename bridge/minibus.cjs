@@ -10,11 +10,15 @@
 //        GET  /api/presence[?work_key=]         joined nodes
 //        POST /api/task {to, work_key, task_id?, instructions}
 //        GET  /api/task/:id · /api/task-result/:id   200 result | 202 pending
+//   CDP  /cdp/<cdp-token>/…   (cdp-token = HMAC-SHA256(secret, "webclaw-cdp"),
+//        so a CDP URL pasted into a tool never leaks the master secret)
 //
-// Security: binds 127.0.0.1 only; every call needs the secret (Bearer /
-// ?token=). WebSockets have no CORS, so upgrades from any http(s) page
-// origin are refused — only extension (chrome-extension://) or origin-less
-// (Node) clients may connect; otherwise any website could drive the browser.
+// Security: binds loopback only (non-loopback hosts need allowRemote); every
+// call needs the secret (Bearer / ?token=). WebSockets have no CORS, so
+// upgrades from any http(s) page origin are refused — only extension
+// (chrome-extension://) or origin-less (Node) clients may connect; otherwise
+// any website could drive the browser. No input may crash the process: every
+// handler is wrapped and answers 400 / closes the socket instead.
 "use strict";
 const http = require("node:http");
 const crypto = require("node:crypto");
@@ -23,24 +27,53 @@ const { upgrade } = require("./ws.cjs");
 const { createCdpEndpoint } = require("./cdp-relay.cjs");
 
 const RESULT_CAP = 500; // task ids kept in memory
+const PER_TASK_CAP = 200; // results kept per task id (HUD inbox grows forever otherwise)
+const MAX_BODY = 4 * 1024 * 1024; // REST request bodies
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+// CDP-only credential derived from the secret (also printed by `webclaw cdp-url`)
+function cdpToken(secret) {
+  return crypto.createHmac("sha256", String(secret)).update("webclaw-cdp").digest("base64url");
+}
+
+// constant-time compare on bytes (a same-length non-ASCII string has a
+// different byte length — timingSafeEqual would throw)
+function safeEqual(token, expected) {
+  if (typeof token !== "string" || !token) return false;
+  const a = Buffer.from(token, "utf8");
+  return a.length === expected.length && crypto.timingSafeEqual(a, expected);
+}
+
+function safeDecode(s) { try { return decodeURIComponent(s); } catch (e) { return null; } }
 
 function createMiniBus(opts) {
   const secret = opts.secret;
   if (!secret) throw new Error("mini-bus needs a secret");
   const log = opts.log || (() => {});
   const sockets = new Set(); // { conn, topics:Set, name, meta }
-  const results = new Map(); // task_id → [result…]
+  const cdpConns = new Set();
+  const results = new Map(); // task_id → [result…]   (insertion order = recency)
   const status = new Map(); // task_id → { status, to, queued_at }
+  const secretBuf = Buffer.from(String(secret), "utf8");
+  const cdpBuf = Buffer.from(cdpToken(secret), "utf8");
+  let boundHost = "127.0.0.1";
 
-  const authOk = (token) => typeof token === "string" && token.length === secret.length &&
-    crypto.timingSafeEqual(Buffer.from(token), Buffer.from(secret));
+  const authOk = (token) => safeEqual(token, secretBuf);
 
+  // recency-ordered maps: delete + set moves the id to the newest end
+  function touch(map, id, value) { map.delete(id); map.set(id, value); }
+  function evict() {
+    while (results.size > RESULT_CAP) { const id = results.keys().next().value; results.delete(id); status.delete(id); }
+    while (status.size > RESULT_CAP * 2) { const id = status.keys().next().value; status.delete(id); results.delete(id); }
+  }
   function remember(taskId, result) {
     const list = results.get(taskId) || [];
     list.push(result);
-    results.set(taskId, list);
-    if (results.size > RESULT_CAP) results.delete(results.keys().next().value);
+    if (list.length > PER_TASK_CAP) list.splice(0, list.length - PER_TASK_CAP);
+    touch(results, taskId, list);
+    evict();
   }
+  function setStatus(taskId, st) { touch(status, taskId, st); evict(); }
 
   function presences(topic) {
     const out = {};
@@ -63,7 +96,11 @@ function createMiniBus(opts) {
   // persisted to opts.registryFile — used to share learnings between nodes.
   let registry = { skills: {} };
   try { if (opts.registryFile) registry = JSON.parse(fs.readFileSync(opts.registryFile, "utf8")); } catch (e) {}
-  const saveRegistry = () => { if (opts.registryFile) try { fs.writeFileSync(opts.registryFile, JSON.stringify(registry), { mode: 0o600 }); } catch (e) {} };
+  if (!registry || typeof registry !== "object" || !registry.skills || typeof registry.skills !== "object") registry = { skills: {} };
+  const saveRegistry = () => {
+    if (!opts.registryFile) return;
+    try { fs.writeFileSync(opts.registryFile, JSON.stringify(registry), { mode: 0o600 }); fs.chmodSync(opts.registryFile, 0o600); } catch (e) {}
+  };
 
   function broadcast(topic, event, payload, except) {
     const frame = JSON.stringify([null, null, topic, event, payload]);
@@ -74,26 +111,29 @@ function createMiniBus(opts) {
     let f;
     try { f = JSON.parse(text); } catch (e) { return; }
     if (!Array.isArray(f) || f.length !== 5) return;
-    const [joinRef, ref, topic, event, payload] = f;
+    const [joinRef, ref, topic, event, rawPayload] = f;
+    if (typeof topic !== "string" || typeof event !== "string") return;
+    const payload = rawPayload && typeof rawPayload === "object" && !Array.isArray(rawPayload) ? rawPayload : {};
     const reply = (response) => s.conn.send(JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "ok", response: response || {} }]));
     if (topic === "phoenix" && event === "heartbeat") return reply({});
     if (event === "phx_join") {
       if (!/^work:/.test(topic)) return s.conn.send(JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "error", response: { reason: "unmatched topic" } }]));
-      const p = payload || {};
+      const p = payload;
       s.topics.add(topic);
-      s.name = p.agent_name || s.name || "unknown@unknown";
-      s.meta = { role: p.role || "unknown", machine: p.machine || "unknown", capabilities: p.capabilities || [],
+      s.name = (typeof p.agent_name === "string" && p.agent_name) || s.name || "unknown@unknown";
+      s.meta = { role: p.role || "unknown", machine: p.machine || "unknown", capabilities: Array.isArray(p.capabilities) ? p.capabilities : [],
         version: p.version, work_key: topic.slice(5), online_since: new Date().toISOString() };
       log("join " + s.name + " → " + topic);
       return reply({ presences: presences(topic) });
     }
     if (event === "phx_leave") { s.topics.delete(topic); return reply({}); }
-    if (event === "cdp.reply" || event === "cdp.event") { cdp.onNodeFrame(s.name, event, payload || {}); return reply({}); }
+    if (event === "cdp.reply" || event === "cdp.event") { cdp.onNodeFrame(s.name, event, payload); return reply({}); }
     if (event === "task.result" || event === "task.ack" || event === "task.blocked") {
       const msg = Object.assign({}, payload, { from: s.name, event, ts: new Date().toISOString() });
-      if (event !== "task.ack" && msg.task_id) {
+      if (event !== "task.ack" && msg.task_id != null && msg.task_id !== "") {
+        msg.task_id = String(msg.task_id);
         remember(msg.task_id, msg);
-        if (event === "task.result") status.set(msg.task_id, Object.assign(status.get(msg.task_id) || {}, { status: msg.status === "done" ? "done" : "failed" }));
+        if (event === "task.result") setStatus(msg.task_id, Object.assign(status.get(msg.task_id) || {}, { status: msg.status === "done" ? "done" : "failed" }));
       }
       broadcast(topic, event, msg, s);
       return reply({});
@@ -101,19 +141,31 @@ function createMiniBus(opts) {
     reply({});
   }
 
-  function send(res, code, obj) {
+  function send(res, code, obj, extra) {
     const body = JSON.stringify(obj);
-    res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    res.writeHead(code, Object.assign({ "content-type": "application/json", "content-length": Buffer.byteLength(body) }, extra || {}));
     res.end(body);
   }
 
+  const TOO_LARGE = Symbol("too large");
   function readBody(req) {
     return new Promise((resolve) => {
+      // too large: answer 413 and keep draining (discarding) so the client sees the answer
+      if (Number(req.headers["content-length"]) > MAX_BODY) { req.resume(); return resolve(TOO_LARGE); }
       const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")); } catch (e) { resolve(null); } });
+      let size = 0, done = false;
+      const finish = (v) => { if (!done) { done = true; resolve(v); } };
+      req.on("data", (c) => {
+        if (done) return;
+        size += c.length;
+        if (size > MAX_BODY) { chunks.length = 0; req.resume(); return finish(TOO_LARGE); }
+        chunks.push(c);
+      });
+      req.on("end", () => { try { finish(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")); } catch (e) { finish(null); } });
+      req.on("error", () => finish(null));
     });
   }
+  const tooLarge = (res) => send(res, 413, { error: "body too large (max " + MAX_BODY + " bytes)" });
 
   function resultBody(id) {
     const list = results.get(id);
@@ -122,11 +174,20 @@ function createMiniBus(opts) {
     return list.length === 1 ? Object.assign({}, st, list[0]) : Object.assign({}, st, { task_id: id, results: list, count: list.length });
   }
 
-  // DNS-rebinding guard: only loopback Host headers
-  const hostOk = (req) => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(req.headers.host || "");
+  // DNS-rebinding guard: only loopback Host headers (or the explicitly bound remote host)
+  const hostOk = (req) => {
+    const h = String(req.headers.host || "");
+    if (/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(h)) return true;
+    if (!opts.allowRemote) return false;
+    const name = h.replace(/:\d+$/, "");
+    return name === boundHost || name === "[" + boundHost + "]";
+  };
+  // /cdp/<cdp-token>/… → the rest of the path, or null (wrong token → falls through to REST auth)
   const cdpPath = (pathname) => {
     const m = pathname.match(/^\/cdp\/([^/]+)(\/.*)?$/);
-    return m && authOk(decodeURIComponent(m[1])) ? (m[2] || "/") : null;
+    if (!m) return null;
+    const tok = safeDecode(m[1]);
+    return tok !== null && safeEqual(tok, cdpBuf) ? (m[2] || "/") : null;
   };
   function pickNode(want) {
     const ns = webclawNodes();
@@ -134,7 +195,7 @@ function createMiniBus(opts) {
     return ns.length === 1 ? ns[0] : null;
   }
 
-  const server = http.createServer(async (req, res) => {
+  async function handleHttp(req, res) {
     const url = new URL(req.url, "http://localhost");
     if (!hostOk(req)) return send(res, 403, { error: "bad host" });
     const cp = cdpPath(url.pathname);
@@ -149,7 +210,7 @@ function createMiniBus(opts) {
       return send(res, 404, { error: "not found" });
     }
     if (req.method === "GET" && url.pathname === "/api/health") return send(res, 200, { ok: true, version: "webclaw-minibus/" + (opts.version || "0"), nodes: sockets.size });
-    const auth = (req.headers.authorization || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token") || "";
+    const auth = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("token") || "";
     if (!authOk(auth)) return send(res, 401, { error: "unauthorized" });
     if (req.method === "GET" && url.pathname === "/api/presence") {
       const wk = url.searchParams.get("work_key");
@@ -162,11 +223,14 @@ function createMiniBus(opts) {
     }
     if (req.method === "POST" && url.pathname === "/api/task") {
       const p = await readBody(req);
-      if (!p || !p.instructions) return send(res, 400, { error: "instructions required" });
-      const wk = p.work_key || opts.workKey || "WK-local";
-      const taskId = p.task_id || "local-" + Date.now() + "-" + crypto.randomBytes(3).toString("hex");
+      if (p === TOO_LARGE) return tooLarge(res);
+      if (!p || typeof p !== "object" || !p.instructions) return send(res, 400, { error: "instructions required" });
+      const wk = typeof p.work_key === "string" && p.work_key ? p.work_key : (opts.workKey || "WK-local");
+      const taskId = p.task_id != null && p.task_id !== "" ? String(p.task_id) : "local-" + Date.now() + "-" + crypto.randomBytes(3).toString("hex");
+      // a reused task_id starts fresh — never hand back the previous run's results
+      results.delete(taskId);
       const payload = { task_id: taskId, from: "http@controller", role: p.role || "executor", to: p.to || null, instructions: p.instructions, work_key: wk };
-      status.set(taskId, { status: "queued", to: p.to || null, queued_at: new Date().toISOString() });
+      setStatus(taskId, { status: "queued", to: p.to || null, queued_at: new Date().toISOString() });
       broadcast("work:" + wk, "task.assign", payload);
       return send(res, 201, { task_id: taskId, work_key: wk, status: "queued", pending: false });
     }
@@ -175,26 +239,37 @@ function createMiniBus(opts) {
     }
     const dl = url.pathname.match(/^\/api\/skill-registry\/download\/([^/]+)$/);
     if (req.method === "GET" && dl) {
-      const e = registry.skills[decodeURIComponent(dl[1])];
-      return e ? send(res, 200, Object.assign({ name: decodeURIComponent(dl[1]) }, e)) : send(res, 404, { error: "skill not found" });
+      const name = safeDecode(dl[1]);
+      if (name === null) return send(res, 400, { error: "bad name encoding" });
+      const e = Object.prototype.hasOwnProperty.call(registry.skills, name) ? registry.skills[name] : null;
+      return e ? send(res, 200, Object.assign({ name }, e)) : send(res, 404, { error: "skill not found" });
     }
     if (req.method === "POST" && url.pathname === "/api/skill-registry/publish") {
       const p = await readBody(req);
-      if (!p || !p.name || !p.version) return send(res, 400, { error: "name and version required" });
+      if (p === TOO_LARGE) return tooLarge(res);
+      if (!p || typeof p !== "object" || typeof p.name !== "string" || !p.name || !p.version || p.name === "__proto__") return send(res, 400, { error: "name and version required" });
       registry.skills[p.name] = { version: p.version, description: p.description || "", content: p.content || "", published_by: p.published_by || "http@controller", published_at: new Date().toISOString() };
       saveRegistry();
       return send(res, 201, { ok: true, name: p.name, entry: registry.skills[p.name] });
     }
     const m = url.pathname.match(/^\/api\/task(?:-result)?\/([^/]+)$/);
     if (req.method === "GET" && m) {
-      const id = decodeURIComponent(m[1]);
+      const id = safeDecode(m[1]);
+      if (id === null) return send(res, 400, { error: "bad task id encoding" });
       const body = resultBody(id);
       return body ? send(res, 200, body) : send(res, 202, Object.assign({ status: "pending" }, status.get(id) || {}, { task_id: id }));
     }
     send(res, 404, { error: "not found" });
+  }
+
+  const server = http.createServer((req, res) => {
+    handleHttp(req, res).catch((e) => {
+      log("http error: " + ((e && e.message) || e));
+      try { if (!res.headersSent) send(res, 400, { error: "bad request" }); else res.destroy(); } catch (e2) { try { res.destroy(); } catch (e3) {} }
+    });
   });
 
-  server.on("upgrade", (req, socket) => {
+  function handleUpgrade(req, socket, head) {
     const url = new URL(req.url, "http://localhost");
     const origin = req.headers.origin || "";
     const deny = (code, why) => { log("ws refused (" + why + ")"); socket.end("HTTP/1.1 " + code + "\r\n\r\n"); };
@@ -203,36 +278,64 @@ function createMiniBus(opts) {
     const cp = cdpPath(url.pathname);
     if (cp !== null) {
       const m = cp.match(/^\/devtools\/browser(?:\/([^/]+))?$/);
-      const node = m && pickNode(m[1] ? decodeURIComponent(m[1]) : "");
+      const want = m && m[1] ? safeDecode(m[1]) : "";
+      const node = m && want !== null && pickNode(want);
       if (!node) return deny("404 Not Found", "cdp node");
-      const conn = upgrade(req, socket);
+      const conn = upgrade(req, socket, head);
       if (!conn) return;
       log("cdp client → " + node);
-      return cdp.attachClient(conn, node);
+      cdpConns.add(conn);
+      cdp.attachClient(conn, node);
+      const onclose = conn.onclose;
+      conn.onclose = () => { cdpConns.delete(conn); onclose && onclose(); };
+      return;
     }
     if (url.pathname !== "/socket/websocket") return deny("404 Not Found", "path");
     if (!authOk(url.searchParams.get("token") || "")) return deny("403 Forbidden", "token");
-    const conn = upgrade(req, socket);
+    const conn = upgrade(req, socket, head);
     if (!conn) return;
     const s = { conn, topics: new Set(), name: null, meta: {} };
     sockets.add(s);
-    conn.onmessage = (text) => onFrame(s, text);
-    conn.onclose = () => { sockets.delete(s); if (s.name) log("left " + s.name); };
+    conn.onmessage = (text) => { try { onFrame(s, text); } catch (e) { log("frame error: " + e.message); } };
+    conn.onclose = () => {
+      sockets.delete(s);
+      if (s.name) {
+        log("left " + s.name);
+        if (![...sockets].some((o) => o.name === s.name)) cdp.nodeGone(s.name);
+      }
+    };
+  }
+
+  server.on("upgrade", (req, socket, head) => {
+    socket.on("error", () => {}); // a reset during the handshake must not crash the bus
+    try { handleUpgrade(req, socket, head); } catch (e) {
+      log("upgrade error: " + ((e && e.message) || e));
+      try { socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"); } catch (e2) {}
+      try { socket.destroy(); } catch (e2) {}
+    }
   });
 
   return {
     server,
     listen(port, host) {
+      const h = host || "127.0.0.1";
+      if (!LOOPBACK.has(h) && !opts.allowRemote) {
+        return Promise.reject(new Error("refusing to listen on non-loopback host " + h + " — pass --allow-remote (or WEBCLAW_ALLOW_REMOTE=1) if you really mean it"));
+      }
+      boundHost = h;
       return new Promise((resolve, reject) => {
         server.once("error", reject);
-        server.listen(port, host || "127.0.0.1", () => resolve(server.address().port));
+        server.listen(port, h, () => resolve(server.address().port));
       });
     },
     close() {
       for (const s of sockets) s.conn.close();
+      for (const c of cdpConns) c.close();
       return new Promise((r) => server.close(() => r()));
     },
+    // test/diagnostic view of the in-memory maps
+    _state: { results, status },
   };
 }
 
-module.exports = { createMiniBus };
+module.exports = { createMiniBus, cdpToken, safeEqual, RESULT_CAP, PER_TASK_CAP, MAX_BODY };
