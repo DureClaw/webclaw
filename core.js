@@ -316,8 +316,10 @@
       if (hooks.learnContext) {
         try { const ctx = await hooks.learnContext(); if (ctx) prompt = ctx + "\n\n" + instr; } catch (e) {}
       }
+      // mode:"chat" — an LLM-style request; the brain drives the browser only
+      // for mode:"goal" (HUD standalone), so a bus task can't recurse into it.
       const r = await fetch(cfg.brainUrl.replace(/\/$/, "") + "/brain/exec", {
-        method: "POST", headers: h, body: JSON.stringify({ prompt }),
+        method: "POST", headers: h, body: JSON.stringify({ prompt, mode: "chat" }),
       });
       const j = await r.json();
       return j.output != null ? j.output : JSON.stringify(j);

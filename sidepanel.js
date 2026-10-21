@@ -20,7 +20,9 @@ function render() {
   state.tasks.forEach((task) => {
     const el = document.createElement("div");
     el.className = "task" + (task.id === state.activeId ? " active" : "");
-    el.innerHTML = `<span class="d"></span>${task.name || "새 작업"}`;
+    // task names come from brain output — text only, never markup
+    const dot = document.createElement("span"); dot.className = "d";
+    el.append(dot, document.createTextNode(task.name || "새 작업"));
     el.onclick = () => B({ type: "wwSwitchTask", id: task.id }).then(load);
     t.insertBefore(el, add);
   });
@@ -71,6 +73,33 @@ async function send() {
 $("send").onclick = send;
 $("in").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 chrome.runtime.onMessage.addListener((m) => { if (m && m.type === "wwUpdated") load(); });
+
+// S1 — policy approvals are answered here (extension-owned UI), never in the
+// page HUD, where a page script could type "/allow-site" itself.
+function renderApprovals(list) {
+  const box = $("approvals");
+  box.innerHTML = "";
+  box.style.display = list && list.length ? "block" : "none";
+  for (const a of list || []) {
+    const row = document.createElement("div"); row.className = "ap";
+    const q = document.createElement("div"); q.className = "q";
+    q.textContent = "🛡️ 승인 요청" + (a.risky ? " (위험 동작)" : "") + ": " + a.what + " @ " + a.host + " · tab " + a.tabId;
+    const btns = document.createElement("div"); btns.className = "btns";
+    for (const [ans, label] of [["allow", "이번만 허용"], ["allow-site", "이 사이트 허용"], ["deny", "거절"]]) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      if (ans === "deny") b.className = "deny";
+      b.onclick = () => B({ type: "approve", id: a.id, answer: ans }).then((r) => renderApprovals(r && r.pending));
+      btns.appendChild(b);
+    }
+    row.append(q, btns);
+    box.appendChild(row);
+  }
+}
+B({ type: "approvals" }).then((r) => renderApprovals(r && r.pending));
+chrome.runtime.onMessage.addListener((m, sender) => {
+  if (m && m.type === "approvalsUpdated" && sender.id === chrome.runtime.id && !sender.tab) renderApprovals(m.pending);
+});
 
 async function switchMode(worker) {
   const { cfg = {} } = await chrome.storage.local.get("cfg");

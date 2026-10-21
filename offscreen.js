@@ -5,14 +5,20 @@ let inst = null;
 let hooks = null, curCfg = null;
 
 // Ask the background SW; reject (with .reason) when it flags { failed:true }.
+// A5 — no reply at all (SW restarted mid-call, listener missing) is a failure
+// too, never a silent "(no result)" success.
 function ask(msg) {
   return new Promise((resolve, reject) =>
     chrome.runtime.sendMessage(msg, (r) => {
-      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-      if (r && r.failed) reject(Object.assign(new Error(r.text || "failed"), { reason: r.reason }));
-      else resolve((r && r.text) || "(no result)");
+      if (chrome.runtime.lastError) return reject(Object.assign(new Error(chrome.runtime.lastError.message), { reason: "no_reply" }));
+      if (!r) return reject(Object.assign(new Error("(no reply from the extension for " + msg.type + ")"), { reason: "no_reply" }));
+      if (r.failed) reject(Object.assign(new Error(r.text || "failed"), { reason: r.reason }));
+      else resolve(r.text || "(no result)");
     }));
 }
+// Messages from our own background worker only (content scripts in tabs also
+// reach extension pages through chrome.runtime).
+const fromBg = (sender) => !!sender && sender.id === chrome.runtime.id && !sender.tab;
 
 // ===== [RUN] — scripts execute in the sandbox iframe; every helper call comes
 // back here as one marker and goes through the same runTask() as a bus task.
@@ -92,18 +98,12 @@ async function start() {
     // value mismatch) with { failed:true, reason }. Reject instead of
     // resolving so core.js's handle() elevates them to status:"failed" +
     // exit_code 1, carrying `reason` through on the Error object.
-    act: (payload) => new Promise((resolve, reject) =>
-      chrome.runtime.sendMessage(Object.assign({ type: "act" }, payload), (r) => {
-        if (r && r.failed) reject(Object.assign(new Error((r && r.text) || "act failed"), { reason: r.reason }));
-        else resolve((r && r.text) || "(no result)");
-      })),
+    // A5: an empty reply / lastError rejects as well (ask()).
+    act: (payload) => ask(Object.assign({ type: "act" }, payload)),
     fetch: (url) => ask({ type: "fetch", url }), // v0.9.0: policy refusals surface as failures
-    download: (url, path) => new Promise((resolve) =>
-      chrome.runtime.sendMessage({ type: "download", url, path }, (r) => resolve((r && r.text) || "(no result)"))),
-    downloadStatus: (id) => new Promise((resolve) =>
-      chrome.runtime.sendMessage({ type: "download", url: id, statusOnly: true }, (r) => resolve((r && r.text) || "(no result)"))),
-    downloadCancel: (id) => new Promise((resolve) =>
-      chrome.runtime.sendMessage({ type: "download", url: id, cancel: true }, (r) => resolve((r && r.text) || "(no result)"))),
+    download: (url, path) => ask({ type: "download", url, path }),
+    downloadStatus: (id) => ask({ type: "download", url: id, statusOnly: true }),
+    downloadCancel: (id) => ask({ type: "download", url: id, cancel: true }),
     domEx: (p) => ask(Object.assign({ type: "dom" }, p)),
     open: (url, urlMatch) => ask({ type: "open", url, urlMatch }),
     // v0.7.0 — scripts, spaces, learnings
@@ -120,17 +120,18 @@ async function start() {
     onTask: (t) => pushFeed({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() }),
   });
 }
-chrome.runtime.onMessage.addListener((msg) => { if (msg && msg.type === "restart") start(); });
+chrome.runtime.onMessage.addListener((msg, sender) => { if (msg && msg.type === "restart" && fromBg(sender)) start(); });
 // CDP relay events (background chrome.debugger.onEvent) → bus
-chrome.runtime.onMessage.addListener((msg) => {
-  if (!msg || msg.type !== "cdpEvent" || !inst || !inst.pushEvent) return;
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || msg.type !== "cdpEvent" || !inst || !inst.pushEvent || !fromBg(sender)) return;
   const { type, ...payload } = msg;
   inst.pushEvent("cdp.event", payload);
 });
 // #11 — HUD chat from the page → publish into this node's bus inbox slot,
-// and mirror it into the popup feed.
-chrome.runtime.onMessage.addListener((msg) => {
-  if (!msg || msg.type !== "busInbox" || !inst || !inst.publishInbox) return;
+// and mirror it into the popup feed. (Relayed by the background worker after
+// its sender / approval checks — never straight from a tab.)
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || msg.type !== "busInbox" || !inst || !inst.publishInbox || !fromBg(sender)) return;
   inst.publishInbox(msg.text, { url: msg.url });
   pushFeed({ dir: "out", name: "🧑 HUD", text: msg.text, at: new Date().toLocaleTimeString() });
 });
