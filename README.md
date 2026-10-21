@@ -246,6 +246,12 @@ the low end of the vendor's range); the LLM row is a real model:
 | modal (2) | 0.53 s · 3 | 29.6 s · 3 | — |
 | wizard (6) | 1.26 s · 7 | — | 0.15 s |
 
+**Laya (local, open source)** — `webclaw laya up` runs [Laya](https://github.com/NandhaKishorM/laya)'s
+`laya-serve` (same `/v1/systemone` protocol, Apache-2.0) on this Mac (MPS); `webclaw goal … --brain laya`
+keeps page content on the machine. Measured: ~0.16–0.7 s per decision, but the shipped checkpoints
+are **not usable zero-shot** for page actions (near-random choices at low confidence, so the loop stops
+with `low_confidence` instead of acting) — fine-tuning on webclaw decisions is the next step.
+
 Loop overhead outside the model is ~25–35 ms per decision. The LLM column includes `claude -p`
 process start-up (≈10 s per decision end to end), so it overstates raw API latency; even so,
 per-step LLM decisions are seconds where System One decisions are hundreds of milliseconds.

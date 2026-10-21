@@ -53,8 +53,8 @@ function shortlist(elements, goal, max = 240) {
   return scored.sort((a, b) => b.s - a.s || a.i - b.i).slice(0, max).sort((a, b) => a.i - b.i).map((x) => x.e);
 }
 
-function buildRequest(goal, page, history, values) {
-  const els = shortlist(page.elements, goal);
+function buildRequest(goal, page, history, values, maxOptions) {
+  const els = shortlist(page.elements, goal, maxOptions || 240);
   const state = {
     goal,
     page: { title: page.title, url: page.url },
@@ -82,7 +82,7 @@ function buildRequest(goal, page, history, values) {
   }
   if (values.length) {
     questions.value = { type: "choice", instructions: "If the next action types or selects, the value from `goal` that belongs in the target element.", criteria: {} };
-    values.forEach((v, i) => { questions.value.criteria["v" + i] = v; });
+    values.slice(0, maxOptions || 60).forEach((v, i) => { questions.value.criteria["v" + i] = v; });
   }
   return { state, questions, shown: els };
 }
@@ -136,7 +136,7 @@ async function runGoal(o) {
     const ol = await m("[OUTLINE" + tab + "]");
     if (ol.status !== "done") return finish(false, ol.reason || "outline_failed", { detail: ol.output });
     const page = parseOutline(ol.output);
-    const { state, questions, shown } = buildRequest(goal, page, history, values);
+    const { state, questions, shown } = buildRequest(goal, page, history, values, o.maxOptions || jev.maxOptions);
     let res;
     try { res = await jev.systemOne(state, questions); }
     catch (e) { return finish(false, e.reason || "jev_error", { detail: e.message }); }
@@ -156,10 +156,11 @@ async function runGoal(o) {
       return out;
     }
 
-    let kind = A.kind && A.kind.choice, kConf = A.kind ? A.kind.confidence : 0;
+    const conf = (a) => (a ? (a.x_jev_confidence != null ? a.x_jev_confidence : a.confidence) : 0);
+    let kind = A.kind && A.kind.choice, kConf = conf(A.kind);
     // a single option is no decision — its confidence is meaningless, treat as certain
-    let target = A.target && A.target.choice, tConf = A.target ? (shown.length === 1 ? 1 : A.target.confidence) : 0;
-    let value = A.value ? values[Number(String(A.value.choice).slice(1))] : undefined, vConf = A.value ? A.value.confidence : 0;
+    let target = A.target && A.target.choice, tConf = A.target ? (shown.length === 1 ? 1 : conf(A.target)) : 0;
+    let value = A.value ? values[Number(String(A.value.choice).slice(1))] : undefined, vConf = A.value ? (Object.keys(questions.value.criteria).length === 1 ? 1 : conf(A.value)) : 0;
     const el = shown.find((e) => e.ref === target);
     const needsTarget = kind === "click" || kind === "type" || kind === "select";
     const needsValue = kind === "type" || kind === "select";

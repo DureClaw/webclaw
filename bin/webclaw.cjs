@@ -24,7 +24,7 @@ const { ensureMiniBus, stopMiniBus, healthy, LOG_FILE } = require("../bridge/dae
 const argv = process.argv.slice(2);
 const cmd = argv[0];
 const flag = (name) => { const i = argv.indexOf("--" + name); return i >= 0 ? (argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : true) : undefined; };
-const positional = argv.slice(1).filter((a, i, arr) => !a.startsWith("--") && !(i > 0 && arr[i - 1].startsWith("--") && ["node", "timeout", "since", "ext-dir", "tab", "max-steps", "min-confidence", "save", "port"].includes(arr[i - 1].slice(2))));
+const positional = argv.slice(1).filter((a, i, arr) => !a.startsWith("--") && !(i > 0 && arr[i - 1].startsWith("--") && ["node", "timeout", "since", "ext-dir", "tab", "max-steps", "min-confidence", "save", "port", "brain"].includes(arr[i - 1].slice(2))));
 
 function die(msg, code = 1) { process.stderr.write(msg + "\n"); process.exit(code); }
 
@@ -54,6 +54,32 @@ async function main() {
     const bye = () => bus.close().then(() => process.exit(0));
     process.on("SIGTERM", bye); process.on("SIGINT", bye);
     return;
+  }
+  if (cmd === "laya") {
+    // local Laya server (Apache-2.0 System One model) for `--brain laya`
+    const os = require("node:os"), { spawn } = require("node:child_process");
+    const home = require("../bridge/config.cjs").HOME_DIR;
+    const venv = process.env.LAYA_VENV || path.join(home, "laya-venv");
+    const bin = path.join(venv, "bin", "laya-serve");
+    const pidFile = path.join(home, "laya.pid"), logFile = path.join(home, "laya-serve.log");
+    const url = "http://127.0.0.1:8077";
+    const healthy = async () => { try { const r = await fetch(url + "/health", { headers: { authorization: "Bearer " + (process.env.LAYA_API_KEY || "laya-local") }, signal: AbortSignal.timeout(1500) }); return r.ok ? r.json() : null; } catch (e) { return null; } };
+    const op = positional[0] || "status";
+    if (op === "status") { const h = await healthy(); return console.log(h ? "laya up on " + url + " · loaded " + (h.loaded || []).join(",") + " · device " + h.device : "laya not running — webclaw laya up"); }
+    if (op === "down") { try { process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGTERM"); fs.unlinkSync(pidFile); console.log("laya stopped"); } catch (e) { console.log("(no laya pid file)"); } return; }
+    if (op === "up") {
+      if (await healthy()) return console.log("laya already up on " + url);
+      if (!fs.existsSync(bin)) die("Laya is not installed. Install it once (≈1–2 GB with weights):\n  uv venv --python 3.12 " + venv + " && VIRTUAL_ENV=" + venv + " uv pip install 'laya[serve]'");
+      const out = fs.openSync(logFile, "a");
+      const child = spawn(bin, [], { detached: true, stdio: ["ignore", out, out], env: Object.assign({}, process.env, {
+        LAYA_HOST: "127.0.0.1", LAYA_PORT: "8077", LAYA_API_KEY: process.env.LAYA_API_KEY || "laya-local",
+        LAYA_DEVICE: process.env.LAYA_DEVICE || (os.arch() === "arm64" && os.platform() === "darwin" ? "mps" : ""), LAYA_MODELS: process.env.LAYA_MODELS || "multilingual" }) });
+      child.unref();
+      fs.writeFileSync(pidFile, String(child.pid));
+      for (let i = 0; i < 200; i++) { await new Promise((r) => setTimeout(r, 1500)); const h = await healthy(); if (h) return console.log("laya up on " + url + " (device " + h.device + ") — webclaw goal … --brain laya"); }
+      die("laya did not come up — see " + logFile);
+    }
+    die("usage: webclaw laya up|down|status");
   }
   if (cmd === "up") { const { cfg } = await prepared(); return console.log("mini-bus up on " + cfg.bus + " (log " + LOG_FILE + ")"); }
   if (cmd === "down") return console.log(stopMiniBus() ? "mini-bus stopped" : "(no mini-bus pid file)");
@@ -167,7 +193,8 @@ async function main() {
     const cfg = loadConfig();
     const { createBrainServer } = require("../bridge/brain/server.cjs");
     const { createJev } = require("../bridge/brain/jev.cjs");
-    const jev = createJev(cfg.jev);
+    const provider = typeof flag("brain") === "string" ? flag("brain") : (cfg.jev && cfg.jev.provider);
+    const jev = createJev(Object.assign({}, cfg.jev, provider ? { provider } : {}));
     const port = Number(flag("port")) || 4111;
     const srv = createBrainServer({ webclaw: client, jev, token: cfg.brainToken || "", log: (m) => console.log(new Date().toISOString() + " " + m),
       defaults: flag("fallback") && cfg.brainUrl ? { fallback: require("../bridge/brain/agent.cjs").llmFallback(cfg.brainUrl, cfg.brainToken) } : {} });
@@ -226,7 +253,7 @@ async function main() {
     "  setup [--standalone] · doctor · nodes · do \"<marker>\" · run <file|-> [--tab <t>] · inbox · mcp · serve|up|down",
     "  audit [n] · rec on|off|status · replay [path] · policy · identity [init] · webmcp list|call <tool> [json]",
     "  learnings export [file]|import <file>|push [name]|pull [name] · cdp-url",
-    "  goal \"<goal>\" [--tab t] [--save d/n] [--fallback] · brain [--port 4111]   (System One brain: TypeSafe Jev)",
+    "  goal \"<goal>\" [--brain jev|laya] [--tab t] [--save d/n] [--fallback] · brain [--port 4111] · laya up|down|status",
     "  flags: --node <name> --timeout <s> --json",
   ].join("\n"), cmd ? 1 : 0);
 }
@@ -237,7 +264,8 @@ async function main() {
 async function runGoalWith(cfg, client, o) {
   const { runGoal, llmFallback } = require("../bridge/brain/agent.cjs");
   const { createJev } = require("../bridge/brain/jev.cjs");
-  const jev = createJev(cfg.jev);
+  const provider = typeof flag("brain") === "string" ? flag("brain") : (cfg.jev && cfg.jev.provider);
+  const jev = createJev(Object.assign({}, cfg.jev, provider ? { provider } : {}));
   const fallback = o.fallback && cfg.brainUrl ? llmFallback(cfg.brainUrl, cfg.brainToken) : undefined;
   const webclaw = o.node ? { dispatch: (mk, op) => client.dispatch(mk, Object.assign({ node: o.node }, op)) } : client;
   return runGoal(Object.assign({}, o, { webclaw, jev, fallback }));

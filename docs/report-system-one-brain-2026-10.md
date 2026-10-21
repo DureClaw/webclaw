@@ -76,3 +76,25 @@ MCP 도구 `webclaw_goal {goal, tab, save}`.
 2. 실패 유형별 보강: 값이 목표에 없을 때(폼 기본값·페이지 데이터) Score/Noul로 "이미 올바른가" 확인, 페이지 내 후보를 value 선택지에 추가.
 3. 이미지 입력(`jev-preview` + 이미지 헤더)로 아웃라인에 안 잡히는 캔버스·아이콘 버튼 대응.
 4. 확신도 임계값을 감사 로그·녹화 데이터로 보정.
+
+## 6. 추가: Laya(오픈소스 대안) 로컬 실측 — 2026-10-21
+
+"leva" = **Laya**([GeekNews](https://news.hada.io/topic?id=33944), [GitHub](https://github.com/NandhaKishorM/laya), Apache-2.0).
+`laya-serve`가 Jev의 `/v1/systemone` 프로토콜을 그대로 구현하므로 같은 루프에 **공급자만 바꿔** 붙였다.
+
+- `webclaw laya up|down|status` — `~/.webclaw/laya-venv`의 `laya-serve`를 루프백 8077에서 실행(M4 Pro, **MPS**).
+- `webclaw goal … --brain laya` / `webclaw brain --brain laya` — 키 없음, 페이지 내용이 이 Mac 밖으로 나가지 않음.
+- Laya 특성 반영: 선택지 16개로 축소(20개 초과 시 정확도 저하), 확신도는 Jev 공식인 `x_jev_confidence` 사용, `max_len` 4096.
+
+**실측(실제 모델, 로그인 페이지 4개 상태: 빈 폼 → 아이디 입력됨 → 비번 입력됨 → 로그인 완료)**
+
+| 체크포인트 | 형식 | 정답 | 지연(예열 후) |
+|---|---|---|---|
+| multilingual (mmBERT 322M) | Choice 4종 | done을 항상 1.00으로 오판, 대상은 늘 첫 요소 | 255–690 ms |
+| english (ModernBERT 421M) | Choice 4종 | kind·target 확신도 0.1–0.3 (사실상 무작위) | 225–266 ms |
+| typed-decisions (421M) | Choice 4종 | 동일하게 무작위 수준 | 159–221 ms |
+| 세 체크포인트 | 요소별 Noul로 재구성 | 각 1/4 (완료 상태만, 임계값 덕) | — |
+
+- **결론: zero-shot Laya는 웹 조작 판단을 못 한다.** 저자도 미세조정 없는 기본 체크포인트는 업무형 판단에서 ≈0.35(무작위 수준)라고 밝힌다. 다만 확신도가 낮게 나오므로 webclaw 루프는 **잘못 실행하지 않고 `low_confidence`로 멈춘다**(게이트가 안전장치로 동작).
+- **속도는 목표에 맞는다**: 로컬 MPS에서 판단 1회 ≈0.16–0.7 s(첫 호출 예열 2–10 s, 체크포인트 교체 시 추가 지연).
+- **다음 단계 = webclaw 판단 데이터로 미세조정**(Laya가 Apple Silicon 미세조정 스크립트 제공). 학습 데이터는 (1) 벤치 픽스처 + 무작위 변형으로 만든 정답 궤적, (2) LLM 폴백·녹화(`[REC]`)에서 나온 실제 판단으로 만들고, **처음 보는 사이트**에서 일반화를 따로 평가해야 한다.
