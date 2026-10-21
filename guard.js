@@ -8,8 +8,12 @@
 //     deny:  [domains],       off-limits: reads, actions, open, fetch, download
 //     confirmRisky: bool,     pay/delete/transfer-looking actions always ask
 //     audit: bool }           record every handled marker (default on)
-// Approval is asked in the page's HUD; the human answers in the HUD chat with
-// /allow (once) · /allow-site (this site, this browser session) · /deny.
+// The config.local.json policy is a *floor*: popup values override it field by
+// field, but its deny list is always unioned in (the popup cannot remove it).
+//
+// Approval is announced in the page's HUD, but answered ONLY on extension-owned
+// surfaces (side panel / popup: Allow once · Allow site · Deny). The HUD lives
+// inside the page's DOM, so anything typed there could be forged by the page.
 
 const GD_RISKY = /(결제|구매|주문|송금|이체|삭제|탈퇴|해지|환불|\bpay\b|payment|purchase|buy now|checkout|place order|transfer|delete|remove account|unsubscribe|cancel subscription)/i;
 const GD_ASK_MS = 120000;
@@ -19,10 +23,56 @@ const GD_REC_MAX = 300;
 
 const gdDefaults = { mode: "auto", allow: [], deny: [], confirmRisky: false, audit: true };
 
-async function gdPolicy() {
-  const { policy } = await chrome.storage.local.get("policy");
-  const cfg = await readCfg();
-  return Object.assign({}, gdDefaults, cfg.policy || {}, policy || {});
+// ── pure helpers (unit-tested in test/hardening.ext.test.cjs) ───────────────
+
+function wcUnion(a, b) {
+  const out = [];
+  for (const x of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
+    const v = String(x).trim();
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+// file policy (floor) ← stored policy (popup); deny lists are unioned.
+function wcMergePolicy(defaults, filePolicy, storedPolicy) {
+  const f = filePolicy || {}, s = storedPolicy || {};
+  const p = Object.assign({}, defaults || {}, f, s);
+  p.deny = wcUnion(f.deny, s.deny);
+  return p;
+}
+
+// Effective config: chrome.storage cfg (connection) over config.local.json, plus
+// popup prefs. When a stored cfg exists its connection fields win entirely (so a
+// Bus/Wide Worker switch in the side panel is not undone by the file), but the
+// file's policy / cdpDeny / identity are always kept as the floor.
+function wcMergeCfg(file, stored, prefs) {
+  file = file || {};
+  const base = stored ? Object.assign({}, stored) : Object.assign({}, file);
+  const out = Object.assign(base, prefs || {});
+  if (file.policy || (stored && stored.policy)) out.policy = wcMergePolicy({}, file.policy, stored && stored.policy);
+  if (Array.isArray(file.cdpDeny) || (stored && Array.isArray(stored.cdpDeny))) out.cdpDeny = wcUnion(file.cdpDeny, stored && stored.cdpDeny);
+  if (file.identity || (stored && stored.identity)) out.identity = Object.assign({}, file.identity || {}, (stored && stored.identity) || {});
+  return out;
+}
+
+// Who sent a runtime message. "ext" = an extension page of ours (offscreen,
+// popup, side panel — no tab); "tab" = our injected HUD script in a tab's main
+// frame. Web pages cannot reach chrome.runtime.onMessage without
+// externally_connectable, but a compromised/forged content context could, so
+// privileged handlers insist on "ext".
+function wcSenderKind(sender, extId) {
+  if (!sender || sender.id !== extId) return "foreign";
+  if (sender.tab) return sender.tab.id != null && (sender.frameId == null || sender.frameId === 0) ? "tab" : "foreign";
+  return "ext";
+}
+
+// What a HUD chat line is: approvals are never accepted from the page.
+function gdHudLineKind(text) {
+  const t = String(text || "").trim();
+  if (/^\/(allow-site|allow|deny)\b/i.test(t)) return "approval";
+  if (/^\/(done|return)\b/i.test(t)) return "done";
+  return "chat";
 }
 
 function gdHost(url) {
@@ -36,6 +86,52 @@ function gdMatch(host, list) {
 }
 function gdFail(text, reason) { return { text, failed: true, reason }; }
 
+// First denied host along a URL chain (request → redirects → final), or "".
+function gdDeniedInChain(urls, deny) {
+  for (const u of urls || []) { const h = gdHost(u); if (gdMatch(h, deny)) return h; }
+  return "";
+}
+
+// Risk label for an act: what the human would see / what GD_RISKY scans.
+// `describe` = a selector whose on-page label must be read first.
+function gdActSpec(msg) {
+  const a = msg.action;
+  const spec = { label: "", describe: null, forceRisky: false };
+  if (a === "clicktext") spec.label = String(msg.value || "");
+  else if (a === "click" || a === "submit") spec.describe = msg.selector || null;
+  else if (a === "diff") {
+    const m = String(msg.code || "").trim().match(/^(clicktext|click):([\s\S]+)$/);
+    if (m && m[1] === "clicktext") spec.label = m[2].trim();
+    else if (m) spec.describe = m[2].trim();
+  } else if (a === "js") spec.label = String(msg.code || ""); // whole body, not a prefix
+  else if (a === "cdp") {
+    const method = String(msg.method || "");
+    spec.label = method + " " + JSON.stringify(msg.params || {});
+    spec.forceRisky = /^Input\./.test(method); // synthetic trusted input
+  }
+  return spec;
+}
+
+function gdIsRisky(p, label, what, forceRisky) {
+  return !!p.confirmRisky && (!!forceRisky || GD_RISKY.test(String(label || "") + " " + String(what || "")));
+}
+
+// Recorder screenshots only for executed actions on non-denied pages.
+function gdRecShoot(entry, p, curUrl) {
+  if (!entry || entry.result !== "ok") return false;
+  if (gdMatch(entry.host, p.deny)) return false;
+  if (curUrl != null && gdMatch(gdHost(curUrl), p.deny)) return false;
+  return true;
+}
+
+// ── policy ──────────────────────────────────────────────────────────────────
+
+async function gdPolicy() {
+  const { policy } = await chrome.storage.local.get("policy");
+  const cfg = await readCfg();
+  return wcMergePolicy(gdDefaults, cfg.policy, policy);
+}
+
 async function gdSessionApproved(host) {
   const { gdApproved = [] } = await chrome.storage.session.get("gdApproved");
   return gdApproved.includes(host);
@@ -46,37 +142,74 @@ async function gdApproveSession(host) {
   await chrome.storage.session.set({ gdApproved });
 }
 
-// ── human approval through the HUD ─────────────────────────────────────────
-const gdPending = new Map(); // tabId → resolve(answer)
+// ── human approval (asked in the HUD, answered in the side panel / popup) ───
+const gdPending = new Map(); // tabId → { id, tabId, host, what, risky, at, resolve }
+let gdPendChain = Promise.resolve();
+
+function gdPendingList() {
+  return [...gdPending.values()].map(({ id, tabId, host, what, risky, at }) => ({ id, tabId, host, what, risky, at }));
+}
+
+// Persist (A12) + badge + tell open panels. Serialized so snapshots land in order.
+function gdPendingChanged() {
+  const list = gdPendingList();
+  gdPendChain = gdPendChain.then(() => chrome.storage.session.set({ gdPending: list })).catch(() => {});
+  try { chrome.action.setBadgeText({ text: list.length ? String(list.length) : "" }); chrome.action.setBadgeBackgroundColor({ color: "#e11d48" }); } catch (e) {}
+  try { chrome.runtime.sendMessage({ type: "approvalsUpdated", pending: list }).catch(() => {}); } catch (e) {}
+  return gdPendChain;
+}
 
 function gdAsk(tabId, host, what, risky) {
   return new Promise((resolve) => {
     const prev = gdPending.get(tabId);
-    if (prev) prev("deny"); // one open question per tab
-    const t = setTimeout(() => { gdPending.delete(tabId); resolve("timeout"); }, GD_ASK_MS);
-    gdPending.set(tabId, (ans) => { clearTimeout(t); gdPending.delete(tabId); resolve(ans); });
+    if (prev) prev.resolve("deny"); // one open question per tab
+    const id = "ap-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+    const t = setTimeout(() => entry.resolve("timeout"), GD_ASK_MS);
+    const entry = {
+      id, tabId, host, what, risky: !!risky, at: Date.now(),
+      resolve: (ans) => {
+        clearTimeout(t);
+        if (gdPending.get(tabId) === entry) { gdPending.delete(tabId); gdPendingChanged(); }
+        resolve(ans);
+      },
+    };
+    gdPending.set(tabId, entry);
+    gdPendingChanged();
     hudNotify(tabId, "🛡️ 승인 요청" + (risky ? " (위험 동작)" : "") + ": " + what + " @ " + host +
-      " — 채팅에 /allow (이번만) · /allow-site (이 사이트 계속) · /deny", null, true);
+      " — 툴바의 webclaw 아이콘(사이드 패널)에서 허용/거절하세요", null, true);
     chrome.runtime.sendMessage({ type: "busInbox", text: "[approval] waiting for the human: " + what + " @ " + host, url: "" }).catch(() => {});
   });
 }
 
-// HUD chat → pending approval. Returns true if the line was an answer.
-function gdAnswer(tabId, text) {
-  const m = String(text || "").trim().match(/^\/(allow-site|allow|deny)\b/i);
-  const r = gdPending.get(tabId);
-  if (!m || !r) return false;
-  r(m[1].toLowerCase());
-  return true;
+// Side panel / popup → answer one pending approval by id.
+function gdAnswerId(id, answer) {
+  const ans = String(answer || "").toLowerCase();
+  if (!["allow", "allow-site", "deny"].includes(ans)) return false;
+  for (const e of gdPending.values()) if (e.id === id) { e.resolve(ans); return true; }
+  return false;
+}
+
+// SW restart: the callers waiting on persisted approvals died with the old
+// worker, so those questions can never be answered — expire them visibly.
+async function gdExpireOrphans() {
+  const { gdPending: stale = [] } = await chrome.storage.session.get("gdPending");
+  if (!stale.length) return 0;
+  await chrome.storage.session.set({ gdPending: gdPendingList() });
+  for (const e of stale) {
+    if (gdPending.has(e.tabId)) continue;
+    hudNotify(e.tabId, "🛡️ 승인 요청이 만료되었습니다 (확장 재시작): " + e.what + " — 실행하지 않았습니다", null, true);
+  }
+  try { chrome.action.setBadgeText({ text: gdPending.size ? String(gdPending.size) : "" }); } catch (e) {}
+  return stale.length;
 }
 
 // Gate one action. Returns null (go) or a failure response.
-async function gdCheck({ url, tabId, mutating, what, label }) {
+async function gdCheck({ url, tabId, mutating, what, label, forceRisky }) {
   const p = await gdPolicy();
   const host = gdHost(url);
   if (gdMatch(host, p.deny)) return gdFail("(policy: " + host + " is on the deny list)", "policy_denied");
   if (!mutating) return null;
-  const risky = !!p.confirmRisky && GD_RISKY.test(String(label || "") + " " + String(what || ""));
+  const risky = gdIsRisky(p, label, what, forceRisky);
   let ask = risky;
   if (p.mode === "ask" && host && !gdMatch(host, p.allow) && !(await gdSessionApproved(host))) ask = true;
   if (!ask) return null;
@@ -107,11 +240,17 @@ function gdRecordAll(entry, tab) {
     if (rec && rec.on && entry.mutating !== false && rec.frames.length < GD_REC_MAX) {
       const frame = Object.assign({}, e);
       const imgs = rec.frames.filter((f) => f.img).length;
-      if (tab && imgs < GD_REC_IMG_MAX && await WcCdp.enabled(tab.id)) {
-        try {
-          const r = await WcCdp.send(tab.id, "Page.captureScreenshot", { format: "jpeg", quality: 30 }, 5000);
-          frame.img = "data:image/jpeg;base64," + r.data;
-        } catch (err) {}
+      if (tab && imgs < GD_REC_IMG_MAX) {
+        // A7 — never capture refused/failed actions or a denied page (the tab
+        // may have navigated somewhere denied since the action ran)
+        let cur = null;
+        try { cur = (await chrome.tabs.get(tab.id)).url || ""; } catch (err) { cur = null; }
+        if (cur != null && gdRecShoot(e, p, cur) && await WcCdp.enabled(tab.id)) {
+          try {
+            const r = await WcCdp.send(tab.id, "Page.captureScreenshot", { format: "jpeg", quality: 30 }, 5000);
+            frame.img = "data:image/jpeg;base64," + r.data;
+          } catch (err) {}
+        }
       }
       rec.frames.push(frame);
       try { await chrome.storage.session.set({ rec }); }
@@ -130,7 +269,14 @@ async function gdAuditTail(n) {
     (e.reason ? " [" + e.reason + "]" : "") + (e.approved ? " (approved:" + e.approved + ")" : "")).join("\n");
 }
 
-async function gdRec(op, arg) {
+// [REC] runs inside the same chain as the recorder writes, so "off" can never
+// be overwritten by a frame write that read the old { on: true } state.
+function gdRec(op, arg) {
+  const run = gdChain.then(() => gdRecNow(op, arg));
+  gdChain = run.catch(() => {});
+  return run;
+}
+async function gdRecNow(op, arg) {
   const { rec } = await chrome.storage.session.get("rec");
   if (op === "on") {
     await chrome.storage.session.set({ rec: { on: true, label: arg || "session", started: new Date().toISOString(), frames: [] } });
@@ -162,26 +308,39 @@ async function gdReplayHtml() {
     "<table><tr><th>#</th><th>time</th><th>action</th><th>result</th><th>screen</th></tr>" + rows + "</table>";
 }
 
-// Gate + label for a resolved act (click/submit text is read from the page).
+// Gate + label for a resolved act (click/submit/[DIFF] target text is read
+// from the page; [JS] is checked whole; [CDP] Input.* counts as risky).
 async function gdGateAct(tab, msg) {
   const mutating = WC_MUTATING.has(msg.action);
-  let label = msg.action === "clicktext" ? msg.value : "";
-  if (mutating && (msg.action === "click" || msg.action === "submit") && msg.selector) {
+  const spec = gdActSpec(msg);
+  let label = spec.label;
+  if (mutating && spec.describe) {
     try {
-      const r = await wcResolve(tab, msg.selector);
+      const r = await wcResolve(tab, spec.describe);
       label = await wcInject(r, "describe", r.css);
     } catch (e) {}
   }
-  if (msg.action === "js" || msg.action === "cdp") label = (msg.code || msg.method || "").slice(0, 80);
-  msg._label = label;
-  return gdCheck({ url: tab.url, tabId: tab.id, mutating, what: "[" + msg.action.toUpperCase() + "] " + (msg.selector || msg.method || ""), label });
+  msg._label = String(label || "").slice(0, 200);
+  const what = "[" + msg.action.toUpperCase() + "] " + (msg.selector || msg.method || (msg.action === "diff" ? String(msg.code || "").slice(0, 60) : ""));
+  return gdCheck({ url: tab.url, tabId: tab.id, mutating, what, label, forceRisky: spec.forceRisky });
+}
+
+// S6 — fill/type values never reach the audit log / recorder.
+function gdRedactOut(action, text) {
+  const s = String(text || "");
+  if (action !== "fill" && action !== "type") return s.slice(0, 200);
+  return s.replace(/ = [\s\S]*$/, " = (redacted)").slice(0, 200);
 }
 
 function gdAuditAct(msg, tab, resp) {
   return gdRecordAll({
-    kind: "act", action: msg.action, target: msg.selector || msg.value || msg.method || (msg.code || "").slice(0, 80),
+    kind: "act", action: msg.action, target: msg.selector || (msg.action === "fill" || msg.action === "type" ? "" : msg.value) || msg.method || (msg.code || "").slice(0, 80),
     host: tab ? gdHost(tab.url) : "", tabId: tab && tab.id, mutating: WC_MUTATING.has(msg.action),
-    result: resp && resp.failed ? "failed" : "ok", reason: resp && resp.reason, out: String((resp && resp.text) || "").slice(0, 200),
+    result: resp && resp.failed ? "failed" : "ok", reason: resp && resp.reason, out: gdRedactOut(msg.action, resp && resp.text),
     label: msg._label || undefined,
   }, tab);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { wcUnion, wcMergePolicy, wcMergeCfg, wcSenderKind, gdHudLineKind, gdHost, gdMatch, gdDeniedInChain, gdActSpec, gdIsRisky, gdRecShoot, gdRedactOut, GD_RISKY };
 }

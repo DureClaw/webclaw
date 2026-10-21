@@ -13,6 +13,17 @@
 // storage.local: wcSpaces = { name: { groupId, windowId, owner, note } },
 //                wcCurrentSpace = name | null, wcAgentWindowId
 
+// A13 — every read-modify-write of wcSpaces runs through one promise chain, so
+// concurrent markers can't lose each other's update (a hand-off overwritten by
+// a parallel spEnsure) or create the same space / agent window twice. Locked
+// bodies call the *Now variants only (nesting spLocked would deadlock).
+let spChain = Promise.resolve();
+function spLocked(fn) {
+  const run = spChain.then(fn);
+  spChain = run.catch(() => {});
+  return run;
+}
+
 async function spLoad() {
   const { wcSpaces = {}, wcCurrentSpace = null } = await chrome.storage.local.get(["wcSpaces", "wcCurrentSpace"]);
   return { spaces: wcSpaces, current: wcCurrentSpace };
@@ -67,7 +78,8 @@ async function spTargetOf(urlMatch) {
   return { space: current, rest: "" };
 }
 
-async function spEnsure(name) {
+function spEnsure(name) { return spLocked(() => spEnsureNow(name)); }
+async function spEnsureNow(name) {
   const { spaces } = await spLoad();
   const sp = spaces[name];
   if (await spGroupAlive(sp)) return sp;
@@ -81,8 +93,9 @@ async function spEnsure(name) {
 }
 
 // Open a URL as a new tab inside a space (agent window stays unfocused).
-async function spOpen(name, url, opts) {
-  const sp = await spEnsure(name);
+function spOpen(name, url, opts) { return spLocked(() => spOpenNow(name, url, opts)); }
+async function spOpenNow(name, url, opts) {
+  const sp = await spEnsureNow(name);
   // reuse the space's placeholder about:blank tab if that's all it has
   // (not for the CDP relay: a client's newPage must be a brand-new target)
   const tabs = await chrome.tabs.query({ groupId: sp.groupId });
@@ -96,7 +109,8 @@ async function spOpen(name, url, opts) {
   return tab;
 }
 
-async function spSetOwner(name, owner, note) {
+function spSetOwner(name, owner, note) { return spLocked(() => spSetOwnerNow(name, owner, note)); }
+async function spSetOwnerNow(name, owner, note) {
   const { spaces } = await spLoad();
   const sp = spaces[name];
   if (!sp) throw wcFail("(no such space: " + name + ")", "no_space");
@@ -133,24 +147,30 @@ async function spHandle(msg) {
   }
   if (msg.op === "space") {
     if (!arg || arg === "off") {
-      await spSave(spaces, null);
+      await spLocked(() => chrome.storage.local.set({ wcCurrentSpace: null }));
       return { text: "space off — markers target the user's active tab again" };
     }
     const cm = arg.match(/^close\s+(.+)$/);
     if (cm) {
       const n = cm[1].trim();
-      const sp = spaces[n];
-      if (!sp) return { text: "(no such space: " + n + ")", failed: true, reason: "no_space" };
-      if (await spGroupAlive(sp)) {
-        const tabs = await chrome.tabs.query({ groupId: sp.groupId });
-        if (tabs.length) await chrome.tabs.remove(tabs.map((t) => t.id));
-      }
-      delete spaces[n];
-      await spSave(spaces, current === n ? null : current);
-      return { text: "closed space " + n };
+      return spLocked(async () => {
+        const { spaces, current } = await spLoad();
+        const sp = spaces[n];
+        if (!sp) return { text: "(no such space: " + n + ")", failed: true, reason: "no_space" };
+        if (await spGroupAlive(sp)) {
+          const tabs = await chrome.tabs.query({ groupId: sp.groupId });
+          if (tabs.length) await chrome.tabs.remove(tabs.map((t) => t.id));
+        }
+        delete spaces[n];
+        await spSave(spaces, current === n ? null : current);
+        return { text: "closed space " + n };
+      });
     }
-    const sp = await spEnsure(arg);
-    await chrome.storage.local.set({ wcCurrentSpace: arg });
+    const sp = await spLocked(async () => {
+      const s = await spEnsureNow(arg);
+      await chrome.storage.local.set({ wcCurrentSpace: arg });
+      return s;
+    });
     return { text: "space " + arg + " ready (window " + sp.windowId + ", group " + sp.groupId + ", owner " + sp.owner + ") — markers without @ now target it; [SPACE] off to release" };
   }
   if (msg.op === "handoff" || msg.op === "takeover") {

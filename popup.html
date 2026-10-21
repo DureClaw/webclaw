@@ -15,6 +15,9 @@
   .feed .in { color: #818cf8; } .feed .out { color: #34d399; } .feed .chat { color: #ffd166; }
   .muted { color: #94a3b8; font-size: 10px; }
   details { margin-top: 4px; } summary { cursor: pointer; font-size: 11px; color: #475569; }
+  #approvals { display: none; margin-bottom: 8px; }
+  #approvals .ap { background: #fff1f2; border: 1px solid #e11d48; border-radius: 7px; padding: 7px 9px; margin-bottom: 6px; font: 11px monospace; word-break: break-all; }
+  #approvals .ap button { margin-top: 5px; padding: 5px; font-size: 11px; }
   #summaryLine { margin-top: 8px; background: #ecfdf5; border: 1px solid #34d399; border-radius: 7px; padding: 7px 9px; font: 11px monospace; display: none; white-space: pre-line; word-break: break-all; }
 </style></head>
 <body>
@@ -24,6 +27,7 @@
     <span class="muted" id="status" style="margin-left:auto">—</span>
   </header>
   <div class="body">
+    <div id="approvals"></div>
     <div id="summaryLine"></div>
     <details id="cfgBox" open>
       <summary>플릿 연결 설정</summary>
@@ -41,6 +45,7 @@
       <select id="pMode"><option value="auto">auto — 정책 범위 안에서 자동</option><option value="ask">ask — 사이트별 첫 조작은 승인</option></select>
       <label>항상 허용 도메인 (줄바꿈 구분)</label><textarea id="pAllow" rows="2"></textarea>
       <label>금지 도메인 — 읽기·조작·열기·fetch 전부 차단</label><textarea id="pDeny" rows="2"></textarea>
+      <div class="muted" id="pDenyFile"></div>
       <label><input type="checkbox" id="pRisky" style="width:auto"> 결제·삭제·송금처럼 보이는 동작은 매번 승인</label>
       <label><input type="checkbox" id="pAudit" style="width:auto" checked> 감사 로그 기록</label>
       <label>CDP 사용</label>

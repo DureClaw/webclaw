@@ -104,7 +104,8 @@ async function wwChat(id, text) {
   task.chat.push({ role: "me", text });
   await chrome.storage.local.set({ wwTasks: tabs });
   await wwSet(tabs, id);
-  // ask the local brain, scoped to this task
+  // ask the local brain, scoped to this task. mode:"chat" = answer only — the
+  // brain drives the browser for mode:"goal" requests exclusively (A3).
   const cfg = await readCfg();
   let out = "두뇌가 설정되지 않았습니다.";
   if (cfg.brainUrl) {
@@ -113,7 +114,7 @@ async function wwChat(id, text) {
       if (cfg.brainToken) h.authorization = "Bearer " + cfg.brainToken;
       const r = await fetch(String(cfg.brainUrl).replace(/\/$/, "") + "/brain/exec", {
         method: "POST", headers: h,
-        body: JSON.stringify({ prompt: `작업 "${task.name}" 컨텍스트에서 사용자 요청에 한국어로 답하라.\n요청: ${text}` }),
+        body: JSON.stringify({ prompt: `작업 "${task.name}" 컨텍스트에서 사용자 요청에 한국어로 답하라.\n요청: ${text}`, mode: "chat" }),
       });
       const j = await r.json(); out = (j.output ?? j.error ?? "").trim() || "응답 없음";
     } catch (e) { out = "brain 연결 실패: " + e; }
@@ -130,7 +131,7 @@ async function wwChat(id, text) {
         if (cfg.brainToken) h.authorization = "Bearer " + cfg.brainToken;
         const r = await fetch(String(cfg.brainUrl).replace(/\/$/, "") + "/brain/exec", {
           method: "POST", headers: h,
-          body: JSON.stringify({ prompt: `다음 요청을 2~6자 한국어 제목으로 요약. 제목만 출력(따옴표·마침표 없이):\n${text}` }),
+          body: JSON.stringify({ prompt: `다음 요청을 2~6자 한국어 제목으로 요약. 제목만 출력(따옴표·마침표 없이):\n${text}`, mode: "title" }),
         });
         const j = await r.json();
         const title = String(j.output ?? "").trim().replace(/^["'「]|["'」.]$/g, "").split("\n")[0].slice(0, 16);
@@ -143,11 +144,16 @@ async function wwChat(id, text) {
     await wwSet(cur, id);
   }
 }
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || !msg.type || !msg.type.startsWith("ww")) return;
+// S1 — privileged handlers answer only our own extension pages (offscreen,
+// popup, side panel), never a content context running inside a web page.
+function wcExt(sender) { return wcSenderKind(sender, chrome.runtime.id) === "ext"; }
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg.type !== "string" || !msg.type.startsWith("ww") || msg.type === "wwUpdated") return;
+  if (!wcExt(sender)) return;
   (async () => {
     if (msg.type === "wwState") { const s = await wwGet(); sendResponse({ ...s, open: false }); return; }
-    if (msg.type === "wwNewTask") { await wwNewTask(msg.name); sendResponse({ ok: true }); return; }
+    if (msg.type === "wwNewTask") { const id = await wwNewTask(msg.name); sendResponse({ ok: true, id }); return; }
     if (msg.type === "wwSwitchTask") { await wwSwitchTask(msg.id); sendResponse({ ok: true }); return; }
     if (msg.type === "wwChat") { await wwChat(msg.id, msg.text); sendResponse({ ok: true }); return; }
     sendResponse(null);
@@ -155,8 +161,8 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   return true; // async
 });
 
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (msg && msg.type === "connect") {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "connect" && wcExt(sender)) {
     ensureOffscreen()
       .then(() => chrome.runtime.sendMessage({ type: "restart" }).catch(() => {}))
       .then(() => sendResponse({ ok: true }))
@@ -178,8 +184,8 @@ async function instanceId() {
 }
 
 // Config provider — the offscreen node can't read chrome.storage, so it asks here.
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "getCfg") return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "getCfg" || !wcExt(sender)) return;
   chrome.storage.local.get("cfg").then(async ({ cfg }) => {
     if (!cfg || !cfg.bus) {
       try { cfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) {}
@@ -194,8 +200,13 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 });
 
 // State sink — the offscreen node can't write chrome.storage, so it routes here (for the popup).
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.type === "state" && msg.patch) chrome.storage.local.set(msg.patch);
+// Only the offscreen node's status keys — never policy/prefs/cfg.
+const WC_STATE_KEYS = new Set(["log", "status", "feed", "activeCfg"]);
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || msg.type !== "state" || !msg.patch || !wcExt(sender)) return;
+  const patch = {};
+  for (const k of Object.keys(msg.patch)) if (WC_STATE_KEYS.has(k)) patch[k] = msg.patch[k];
+  chrome.storage.local.set(patch);
 });
 
 // #11 — HUD chat: a message typed into the on-page panel. Echo it locally and
@@ -205,17 +216,19 @@ chrome.runtime.onMessage.addListener((msg) => {
 // v0.9.0 — human "prefs" from the popup (cdp mode, relay scope, webmcp) win
 // over the connection config; the bundled file read is cached briefly since
 // policy/CDP checks now consult the config on every action.
+// A6 — the file's policy/cdpDeny/identity are a floor that survives a stored
+// cfg (popup Connect) — see wcMergeCfg in guard.js.
 let wcFileCfg = null, wcFileCfgAt = 0;
-async function readCfg() {
-  let { cfg, prefs } = await chrome.storage.local.get(["cfg", "prefs"]);
-  if (!cfg) {
-    if (!wcFileCfg || Date.now() - wcFileCfgAt > 3000) {
-      try { wcFileCfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) { wcFileCfg = {}; }
-      wcFileCfgAt = Date.now();
-    }
-    cfg = wcFileCfg;
+async function readFileCfg() {
+  if (!wcFileCfg || Date.now() - wcFileCfgAt > 3000) {
+    try { wcFileCfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) { wcFileCfg = {}; }
+    wcFileCfgAt = Date.now();
   }
-  return Object.assign({}, cfg || {}, prefs || {});
+  return wcFileCfg || {};
+}
+async function readCfg() {
+  const { cfg, prefs } = await chrome.storage.local.get(["cfg", "prefs"]);
+  return wcMergeCfg(await readFileCfg(), cfg || null, prefs || {});
 }
 
 // Standalone brain call: ask the local Wide Worker brain to turn a chat line
@@ -233,10 +246,16 @@ async function standaloneHandle(tabId, text, url) {
   const fullPrompt = notes ? notes + "\n\n" + prompt : prompt;
   const h = { "content-type": "application/json" };
   if (cfg.brainToken) h.authorization = "Bearer " + cfg.brainToken;
+  // A3 — a HUD request is a *goal*: the brain may drive this node's browser.
+  // node = the identity actually joined on the bus, tab = host+path in front.
+  const { activeCfg } = await chrome.storage.local.get("activeCfg");
+  let tabHint = "";
+  try { const u = new URL(url); tabHint = u.host + u.pathname; } catch (e) {}
   let out = "";
   try {
     const r = await fetch(String(cfg.brainUrl).replace(/\/$/, "") + "/brain/exec", {
-      method: "POST", headers: h, body: JSON.stringify({ prompt: fullPrompt }),
+      method: "POST", headers: h,
+      body: JSON.stringify({ prompt: fullPrompt, mode: "goal", node: (activeCfg && activeCfg.name) || cfg.name || "", tab: tabHint }),
     });
     const j = await r.json();
     out = (j.output ?? j.error ?? "").trim();
@@ -249,45 +268,77 @@ async function standaloneHandle(tabId, text, url) {
     const rest = line.replace(/^\s*\[[A-Za-z?]+\]\s*/, "").trim();
     const name = mk[1].toUpperCase();
     hudNotify(tabId, "🤖 " + line, null, true);
-    if (name === "OPEN") { const t = await pickTab(); await new Promise((res) => chrome.runtime.sendMessage({ type: "open", url: rest }, res)); }
+    // B — call the open logic directly (a SW's sendMessage never reaches its
+    // own onMessage listeners, so the old self-message was silently dropped)
+    if (name === "OPEN") {
+      const resp = await wcOpenLogged({ url: rest });
+      hudNotify(tabId, "🤖 " + String((resp && resp.text) || "").slice(0, 200), null, true);
+    }
     // (other markers can be wired here; OPEN covers the common "검색/열기" case)
   } else {
     hudNotify(tabId, "🤖 master: " + out.slice(0, 300));
   }
 }
 
+// Pure decision for one hudChat runtime message (unit-tested): only our HUD in
+// a tab's main frame may send it, and approvals are never taken from the page.
+function wcHudChatDecision(msg, sender, extId) {
+  if (wcSenderKind(sender, extId) !== "tab") return { accept: false, why: "sender" };
+  if (typeof msg.text !== "string" || !msg.text.trim() || msg.text.length > 4000) return { accept: false, why: "text" };
+  return { accept: true, kind: gdHudLineKind(msg.text) };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || msg.type !== "hudChat") return;
-  const tabId = sender.tab && sender.tab.id;
-  if (tabId) {
-    hudNotify(tabId, "🧑 나: " + msg.text);
-    chrome.storage.local.set({ lastChatTabId: tabId });
+  const d = wcHudChatDecision(msg, sender, chrome.runtime.id);
+  if (!d.accept) return;
+  const tabId = sender.tab.id;
+  const url = sender.url || sender.tab.url || ""; // not the page-supplied msg.url
+  hudNotify(tabId, "🧑 나: " + msg.text);
+  chrome.storage.local.set({ lastChatTabId: tabId });
+  // S1 — /allow · /allow-site · /deny typed in the page HUD are NOT accepted
+  // (a page script could forge them). A12: never forwarded to the master either.
+  if (d.kind === "approval") {
+    hudNotify(tabId, "🛡️ 승인은 이 페이지가 아닌 webclaw 사이드 패널(툴바 아이콘)에서만 할 수 있습니다", null, true);
+    return;
   }
-  // v0.9.0 — /allow · /allow-site · /deny answer a pending policy approval
-  if (tabId && gdAnswer(tabId, msg.text)) return;
   // v0.7.0 — "/done" in a handed-off Space returns control to the agent and
   // tells the master (inbox) so it can resume.
-  if (tabId && /^\/(done|return)\b/i.test(String(msg.text).trim())) {
+  if (d.kind === "done") {
     chrome.tabs.get(tabId).then(spUserDone).then((name) => {
       if (!name) return;
       hudNotify(tabId, "🤖 제어권을 에이전트에게 돌려줬습니다 (space " + name + ")", null, true);
-      chrome.runtime.sendMessage({ type: "busInbox", text: "[space " + name + "] user returned control (/done)", url: msg.url || "" }).catch(() => {});
+      chrome.runtime.sendMessage({ type: "busInbox", text: "[space " + name + "] user returned control (/done)", url }).catch(() => {});
     }).catch(() => {});
   }
   readCfg().then((cfg) => {
     if (cfg.standalone && cfg.brainUrl) {
       // single-machine: process locally, no bus/master needed.
-      if (tabId) standaloneHandle(tabId, msg.text, msg.url || "");
+      standaloneHandle(tabId, msg.text, url);
     } else {
       // fleet mode: publish to the inbox for a remote master to pick up.
-      chrome.runtime.sendMessage({ type: "busInbox", text: msg.text, url: msg.url || "" }).catch(() => {});
+      chrome.runtime.sendMessage({ type: "busInbox", text: msg.text, url }).catch(() => {});
     }
   });
 });
 
+// S1 — approvals are answered on extension-owned surfaces only (side panel,
+// popup). Also serves the popup's effective-policy view (A6).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || (msg.type !== "approvals" && msg.type !== "approve" && msg.type !== "effectivePolicy")) return;
+  if (!wcExt(sender)) return;
+  (async () => {
+    if (msg.type === "approvals") return { pending: gdPendingList() };
+    if (msg.type === "approve") return { ok: gdAnswerId(String(msg.id || ""), msg.answer), pending: gdPendingList() };
+    const file = await readFileCfg();
+    return { policy: await gdPolicy(), fileDeny: wcUnion((file.policy || {}).deny, []) };
+  })().then(sendResponse, (e) => sendResponse({ error: String(e) }));
+  return true; // async
+});
+
 // Popup quick action — turn the HUD on for the active tab.
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "hudHere") return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "hudHere" || !wcExt(sender)) return;
   chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
     if (!tab) { sendResponse({ ok: false }); return; }
     hudNotify(tab.id, "HUD on — 이 탭에서 에이전트가 작업합니다").then(() => sendResponse({ ok: true }));
@@ -364,42 +415,52 @@ async function groupWebclawTab(tab) {
 // session), wait for it to finish, return title+URL. The natural way to *show*
 // a result to the human (e.g. a search) instead of scraping it. The new tab is
 // added to the fleet's tab group so opened tabs stay clustered.
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "open") return;
-  const respond = sendResponse;
-  sendResponse = (resp) => {
-    gdRecordAll({ kind: "open", target: msg.url, host: gdHost(msg.url), result: resp && resp.failed ? "failed" : "ok", reason: resp && resp.reason, out: String((resp && resp.text) || "").slice(0, 200) },
-      (resp && resp._tab) || null).then(() => { if (resp) delete resp._tab; respond(resp); });
-  };
-  (async () => {
-    const gate = await gdCheck({ url: msg.url, mutating: false });
-    if (gate) return sendResponse(gate);
-    // v0.7.0 — inside a Space: new tab in the unfocused agent window.
-    const { space } = await spTargetOf(msg.urlMatch);
-    if (space) {
-      const { spaces } = await spLoad();
-      if (spaces[space] && spaces[space].owner === "user") {
-        return sendResponse({ text: "(space '" + space + "' is handed off to the user)", failed: true, reason: "handed_off" });
-      }
-      const tab = await spOpen(space, msg.url);
-      await waitTabReady(tab.id, 20000);
-      const t = await chrome.tabs.get(tab.id);
-      return sendResponse({ text: "opened in space " + space + " (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || ""), _tab: t });
+async function wcOpen(msg) {
+  const url = String(msg.url || "").trim();
+  if (!url) return { text: "(bad [OPEN] — expected: [OPEN] <url>)", failed: true, reason: "bad_args" };
+  const gate = await gdCheck({ url, mutating: false });
+  if (gate) return gate;
+  // v0.7.0 — inside a Space: new tab in the unfocused agent window.
+  const { space } = await spTargetOf(msg.urlMatch);
+  if (space) {
+    const { spaces } = await spLoad();
+    if (spaces[space] && spaces[space].owner === "user") {
+      return { text: "(space '" + space + "' is handed off to the user)", failed: true, reason: "handed_off" };
     }
-    const tab = await chrome.tabs.create({ url: msg.url, active: true });
-    await groupWebclawTab(tab);
+    const tab = await spOpen(space, url);
     await waitTabReady(tab.id, 20000);
     const t = await chrome.tabs.get(tab.id);
-    hudNotify(tab.id, "[OPEN] " + msg.url.slice(0, 80));
-    sendResponse({ text: "opened (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || ""), _tab: t });
-  })().catch((e) => sendResponse({ text: "open error: " + e }));
+    return { text: "opened in space " + space + " (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || ""), _tab: t };
+  }
+  const tab = await chrome.tabs.create({ url, active: true });
+  await groupWebclawTab(tab);
+  await waitTabReady(tab.id, 20000);
+  const t = await chrome.tabs.get(tab.id);
+  hudNotify(tab.id, "[OPEN] " + url.slice(0, 80));
+  return { text: "opened (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || ""), _tab: t };
+}
+
+// wcOpen + audit, errors → failed:true (A5). Shared by the marker and the
+// standalone HUD path.
+async function wcOpenLogged(msg) {
+  let resp;
+  try { resp = await wcOpen(msg); } catch (e) { resp = { text: "open error: " + ((e && e.message) || e), failed: true, reason: "open_error" }; }
+  await gdRecordAll({ kind: "open", target: msg.url, host: gdHost(msg.url), result: resp.failed ? "failed" : "ok", reason: resp.reason, out: String(resp.text || "").slice(0, 200) },
+    resp._tab || null);
+  delete resp._tab;
+  return resp;
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "open" || !wcExt(sender)) return;
+  wcOpenLogged(msg).then(sendResponse);
   return true; // async
 });
 
 // [TABS] — list open tabs so the master can see which one holds the logged-in
 // session and target it with @<url-substring>.
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "tabs") return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "tabs" || !wcExt(sender)) return;
   chrome.tabs.query({}).then(async (tabs) => {
     // Map groupId → title so the listing can cluster tabs by their group.
     const gmap = {};
@@ -428,10 +489,10 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 // [DOM] hands — read the target tab's DOM (raised cap, waits out navigation).
 // mode "links" → [{text, href}] for anchors; mode "attr" → attribute values. (#8)
 // Over-cap output gets an explicit truncated trailer instead of a silent cut. (#9)
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "dom") return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "dom" || !wcExt(sender)) return;
   pickTab(msg.urlMatch).then(async (tab) => {
-    if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
+    if (!tab) { sendResponse({ text: "(no target tab)", failed: true, reason: "no_tab" }); return; }
     await waitTabReady(tab.id); // #4
     const gate = await gdCheck({ url: tab.url, mutating: false });
     if (gate) { sendResponse(gate); return; }
@@ -479,25 +540,38 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       sendResponse({ text: out });
     }).catch((e) => sendResponse(r.ref && /document|frame/i.test(String(e))
       ? { text: "(stale ref: " + r.ref + " — run [OUTLINE] again)", failed: true, reason: "stale_ref" }
-      : { text: "scripting error: " + e }));
-  });
+      : { text: "scripting error: " + e, failed: true, reason: "scripting_error" }));
+  }).catch((e) => sendResponse({ text: "dom error: " + ((e && e.message) || e), failed: true, reason: "dom_error" }));
   return true; // async
 });
 
 // [FETCH] — extension fetch bypasses page CORS via host_permissions.
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "fetch") return;
-  (async () => {
-    const gate = await gdCheck({ url: msg.url, mutating: false });
-    if (gate) return gate;
-    // v0.9.0 — Web Bot Auth signature on our own fetches when the human enabled it
-    const headers = await idHeadersFor(msg.url);
-    const r = await fetch(msg.url, headers ? { headers } : undefined);
-    return { text: await r.text(), signed: !!headers };
-  })().then((resp) => {
+// S5 — redirects are re-checked against the deny list: an allowed URL that
+// redirects to a denied host returns nothing from the denied side. (An
+// extension's redirect:"manual" fetch only sees an opaque redirect with no
+// Location, so the final URL is what can be checked.) A5 — non-2xx is a failure.
+async function wcFetch(msg) {
+  const gate = await gdCheck({ url: msg.url, mutating: false });
+  if (gate) return gate;
+  // v0.9.0 — Web Bot Auth signature on our own fetches when the human enabled it
+  const headers = await idHeadersFor(msg.url);
+  const r = await fetch(msg.url, headers ? { headers, redirect: "follow" } : { redirect: "follow" });
+  const deniedHost = gdDeniedInChain([msg.url, r.url], (await gdPolicy()).deny);
+  if (deniedHost) {
+    try { r.body && r.body.cancel(); } catch (e) {}
+    return { text: "(policy: redirected to " + deniedHost + ", which is on the deny list)", failed: true, reason: "policy_denied", signed: !!headers };
+  }
+  const text = await r.text();
+  if (!r.ok) return { text: "HTTP " + r.status + " " + (r.statusText || "") + "\n" + text, failed: true, reason: "http_" + r.status, status: r.status, signed: !!headers };
+  return { text, status: r.status, signed: !!headers };
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "fetch" || !wcExt(sender)) return;
+  wcFetch(msg).catch((e) => ({ text: "fetch error: " + ((e && e.message) || e), failed: true, reason: "fetch_error" })).then((resp) => {
     gdRecordAll({ kind: "fetch", target: msg.url, host: gdHost(msg.url), mutating: false, result: resp.failed ? "failed" : "ok", reason: resp.reason, signed: resp.signed });
     sendResponse(resp);
-  }, (e) => sendResponse({ text: "fetch error: " + e }));
+  });
   return true; // async
 });
 
@@ -522,24 +596,48 @@ function describeDownload(id) {
   });
 }
 
-function waitDownloadDone(id, timeoutMs = DL_WAIT_MS) {
+function waitDownloadDone(id, timeoutMs = DL_WAIT_MS, deny) {
   return new Promise((resolve) => {
     let done = false;
-    const finish = (how) => {
+    const finish = (how, deniedHost) => {
       if (done) return;
       done = true;
       chrome.downloads.onChanged.removeListener(onChg);
-      describeDownload(id).then((desc) => resolve(how === "timeout" ? desc.replace(/^download \w+/, "download in_progress") : desc));
+      chrome.downloads.search({ id }, (items) => {
+        const d = (items && items[0]) || {};
+        // S5 — a redirect may have landed on a denied host: cancel + remove
+        const bad = deniedHost || gdDeniedInChain([d.finalUrl], deny);
+        if (bad) {
+          const drop = () => chrome.downloads.erase({ id }, () => void chrome.runtime.lastError);
+          chrome.downloads.cancel(id, () => {
+            void chrome.runtime.lastError;
+            if (d.state === "complete") chrome.downloads.removeFile(id, () => { void chrome.runtime.lastError; drop(); });
+            else drop();
+          });
+          return resolve({ text: "(policy: download redirected to " + bad + ", which is on the deny list — cancelled and removed)", failed: true, reason: "policy_denied" });
+        }
+        describeDownload(id).then((desc) => {
+          if (how === "timeout") return resolve({ text: desc.replace(/^download \w+/, "download in_progress") });
+          if (d.state === "interrupted") return resolve({ text: desc, failed: true, reason: "download_interrupted" });
+          resolve({ text: desc });
+        });
+      });
     };
     const onChg = (delta) => {
-      if (delta.id !== id || !delta.state) return;
+      if (delta.id !== id) return;
+      if (delta.finalUrl && delta.finalUrl.current) {
+        const bad = gdDeniedInChain([delta.finalUrl.current], deny);
+        if (bad) return finish("denied", bad);
+      }
+      if (!delta.state) return;
       if (delta.state.current === "complete" || delta.state.current === "interrupted") finish("state");
     };
     chrome.downloads.onChanged.addListener(onChg);
     // it may already be finished by the time we attach the listener
     chrome.downloads.search({ id }, (items) => {
       const d = items && items[0];
-      if (d && (d.state === "complete" || d.state === "interrupted")) finish("state");
+      if (d && gdDeniedInChain([d.finalUrl], deny)) finish("denied");
+      else if (d && (d.state === "complete" || d.state === "interrupted")) finish("state");
     });
     setTimeout(() => finish("timeout"), timeoutMs);
   });
@@ -554,6 +652,7 @@ let dlChain = Promise.resolve();
 // never collide or trigger the browser's duplicate-download blocking. `url`
 // is a real page URL for DOWNLOAD, or a data: URL (captured screenshot) for
 // SHOT — chrome.downloads.download accepts both identically.
+// Resolves { text, failed?, reason? } (A5: errors/interruptions are failures).
 function queueDownload(url, path) {
   // saveAs:false suppresses the per-file "Save as" dialog even when the
   // browser is configured to ask for a location — automated downloads land
@@ -563,25 +662,28 @@ function queueDownload(url, path) {
   // files from different sources apart.
   if (path) opts.filename = String(path).replace(/\.\.(\/|\\)/g, "").replace(/^[/\\]+/, "");
   return new Promise((resolveOuter) => {
-    dlChain = dlChain.then(() => new Promise((resolveQueue) => {
-      chrome.downloads.download(opts, (id) => {
-        if (chrome.runtime.lastError) {
-          resolveOuter("download error: " + chrome.runtime.lastError.message);
-          resolveQueue();
-        } else {
-          waitDownloadDone(id).then((text) => { resolveOuter(text); resolveQueue(); }); // #2
-        }
+    dlChain = dlChain.then(async () => {
+      const deny = /^data:/i.test(url) ? [] : (await gdPolicy()).deny;
+      await new Promise((resolveQueue) => {
+        chrome.downloads.download(opts, (id) => {
+          if (chrome.runtime.lastError) {
+            resolveOuter({ text: "download error: " + chrome.runtime.lastError.message, failed: true, reason: "download_error" });
+            resolveQueue();
+          } else {
+            waitDownloadDone(id, DL_WAIT_MS, deny).then((res) => { resolveOuter(res); resolveQueue(); }); // #2
+          }
+        });
       });
-    })).catch(() => resolveOuter("download error: queue failure"));
+    }).catch(() => resolveOuter({ text: "download error: queue failure", failed: true, reason: "download_error" }));
   });
 }
 
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "download") return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "download" || !wcExt(sender)) return;
   try {
     // [DOWNLOAD?] <id> — status re-query for a long-running download.
     if (msg.statusOnly) {
-      describeDownload(Number(msg.url)).then((text) => sendResponse({ text }));
+      describeDownload(Number(msg.url)).then((text) => sendResponse(/not found$/.test(text) ? { text, failed: true, reason: "not_found" } : { text }));
       return true;
     }
     // [CANCEL] <id|all> — stop a runaway download without manual browser UI. (#7)
@@ -594,66 +696,109 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
         });
       } else {
         chrome.downloads.cancel(Number(target), () => {
-          if (chrome.runtime.lastError) sendResponse({ text: "cancel error: " + chrome.runtime.lastError.message });
+          if (chrome.runtime.lastError) sendResponse({ text: "cancel error: " + chrome.runtime.lastError.message, failed: true, reason: "cancel_error" });
           else describeDownload(Number(target)).then((text) => sendResponse({ text }));
         });
       }
       return true;
     }
     gdCheck({ url: msg.url, mutating: false }).then((gate) => {
-    if (gate) return sendResponse(gate);
-    gdRecordAll({ kind: "download", target: msg.url, host: gdHost(msg.url), mutating: false, result: "ok", out: msg.path || "" });
-    queueDownload(msg.url, msg.path).then(async (text) => {
-      // Downloads are tab-independent → mirror into the conversation tab
-      // with a [전체] (global) badge instead of every tab's panel.
-      const { lastChatTabId } = await chrome.storage.local.get("lastChatTabId");
-      if (lastChatTabId) hudNotify(lastChatTabId, "⬇️ " + text.slice(0, 140), null, true, "global");
-      sendResponse({ text });
-    });
-    });
-  } catch (e) { sendResponse({ text: "download error: " + e }); }
+      if (gate) return sendResponse(gate);
+      return queueDownload(msg.url, msg.path).then(async (res) => {
+        gdRecordAll({ kind: "download", target: msg.url, host: gdHost(msg.url), mutating: false, result: res.failed ? "failed" : "ok", reason: res.reason, out: msg.path || "" });
+        // Downloads are tab-independent → mirror into the conversation tab
+        // with a [전체] (global) badge instead of every tab's panel. S6: only
+        // the state + saved file name — never the source URL (tokens) or text.
+        const { lastChatTabId } = await chrome.storage.local.get("lastChatTabId");
+        if (lastChatTabId) hudNotify(lastChatTabId, "⬇️ " + wcDownloadMirror(res), null, true, "global");
+        sendResponse(res);
+      });
+    }).catch((e) => sendResponse({ text: "download error: " + e, failed: true, reason: "download_error" }));
+  } catch (e) { sendResponse({ text: "download error: " + e, failed: true, reason: "download_error" }); }
   return true; // async
 });
+
+// "download complete (id=7) → /Users/me/Downloads/a.pdf (123 bytes)" → "download complete #7 · a.pdf"
+function wcDownloadMirror(res) {
+  const m = String((res && res.text) || "").match(/^download (\w+) \(id=(\d+)\) → (.*?)(?: \(\d+ bytes\))?(?: error=.*)?$/);
+  if (m) return "download " + m[1] + " #" + m[2] + " · " + String(m[3]).split(/[\\/]/).pop().slice(0, 80);
+  return res && res.failed ? "download failed (" + (res.reason || "error") + ")" : "download";
+}
 
 // #10 — visual HUD injected as a *static* extension function (isolated world,
 // so page CSP that forbids eval cannot block it): a glowing "agent is working
 // here" border, a ghost cursor on clicks, and a right-side action log panel so
 // the human can supervise what the agent does in their browser.
-// Persistent chat history, **scoped per tab** (like one session per tab):
-// survives page navigations within the tab, but other tabs don't see it.
-// Tab-independent events (downloads etc.) are mirrored into the conversation
-// tab with a [전체] (global) badge so scopes are distinguishable.
-async function hudHistory(tabId, entry) {
-  const { chatHistories = {} } = await chrome.storage.local.get("chatHistories");
-  const key = String(tabId);
-  const hist = chatHistories[key] || [];
-  if (entry) {
-    hist.push(entry);
-    while (hist.length > 120) hist.shift();
-    chatHistories[key] = hist;
-    await chrome.storage.local.set({ chatHistories });
-  }
-  return hist.slice(-60);
+// Persistent chat history, **scoped per tab + origin** (S6): survives page
+// navigations within the same site, but is dropped as soon as the tab moves
+// to another origin — the HUD lives in the page's DOM, so a different site
+// must never be handed the previous site's conversation. Other tabs don't see
+// it. Tab-independent events (downloads etc.) are mirrored into the
+// conversation tab with a [전체] (global) badge so scopes are distinguishable.
+// Every read-modify-write of chatHistories goes through one chain (B).
+let hudChain = Promise.resolve();
+function hudLocked(fn) { const run = hudChain.then(fn); hudChain = run.catch(() => {}); return run; }
+function hudKey(tabId, url) { let o = ""; try { o = new URL(url).origin; } catch (e) {} return String(tabId) + "|" + o; }
+
+function hudHistory(tabId, url, entry) {
+  return hudLocked(async () => {
+    const { chatHistories = {} } = await chrome.storage.local.get("chatHistories");
+    const key = hudKey(tabId, url);
+    const hist = chatHistories[key] || [];
+    if (entry) {
+      hist.push(entry);
+      while (hist.length > 120) hist.shift();
+      chatHistories[key] = hist;
+      await chrome.storage.local.set({ chatHistories });
+    }
+    return hist.slice(-60);
+  });
 }
 
-// Closed tab → drop its conversation (a session ends with its tab).
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const { chatHistories = {} } = await chrome.storage.local.get("chatHistories");
-  if (chatHistories[String(tabId)]) {
-    delete chatHistories[String(tabId)];
-    chrome.storage.local.set({ chatHistories });
-  }
-});
+// Drop a tab's conversations — all of them, or all but `keepKey`.
+function hudForget(tabId, keepKey) {
+  return hudLocked(async () => {
+    const { chatHistories = {} } = await chrome.storage.local.get("chatHistories");
+    let changed = false;
+    for (const k of Object.keys(chatHistories)) {
+      if ((k === String(tabId) || k.startsWith(tabId + "|")) && k !== keepKey) { delete chatHistories[k]; changed = true; }
+    }
+    if (changed) await chrome.storage.local.set({ chatHistories });
+  });
+}
+
+// SW startup: forget conversations of tabs that no longer exist (onRemoved
+// does not fire for tabs closed while the worker was gone) and the old
+// per-tab-only keys.
+async function hudPrune() {
+  const alive = new Set((await chrome.tabs.query({})).map((t) => String(t.id)));
+  return hudLocked(async () => {
+    const { chatHistories = {} } = await chrome.storage.local.get("chatHistories");
+    let changed = false;
+    for (const k of Object.keys(chatHistories)) {
+      const [tid, origin] = k.split("|");
+      if (origin === undefined || !alive.has(tid)) { delete chatHistories[k]; changed = true; }
+    }
+    if (changed) await chrome.storage.local.set({ chatHistories });
+  });
+}
+
+// Closed tab → drop its conversation (a session ends with its tab); another
+// origin in the same tab → drop the previous site's conversation.
+chrome.tabs.onRemoved.addListener((tabId) => { hudForget(tabId, null); });
+chrome.tabs.onUpdated.addListener((tabId, info) => { if (info && info.url) hudForget(tabId, hudKey(tabId, info.url)); });
 
 function hudNotify(tabId, text, click, working, scope) {
   const run = async () => {
     let hist = [];
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const url = (tab && (tab.url || tab.pendingUrl)) || "";
     if (text && text !== "__OFF__") {
       const kind = text.startsWith("🧑") ? "user" : text.startsWith("🤖 master") ? "master" : "action";
       const shown = (scope === "global" ? "[전체] " : "") + String(text).slice(0, 300);
-      hist = await hudHistory(tabId, { at: new Date().toLocaleTimeString().slice(0, 8), kind, text: shown });
+      hist = await hudHistory(tabId, url, { at: new Date().toLocaleTimeString().slice(0, 8), kind, text: shown });
     } else if (text !== "__OFF__") {
-      hist = await hudHistory(tabId, null);
+      hist = await hudHistory(tabId, url, null);
     }
     return chrome.scripting.executeScript({
       target: { tabId },
@@ -699,18 +844,25 @@ function hudInjected(text, click, off, working, hist, scope) {
         // NOT a floating card. The page is pushed left by PW (margin-right below),
         // so the panel never covers page content.
         panel.style.cssText = "position:fixed;top:0;right:0;bottom:0;width:" + PW + "px;display:flex;flex-direction:column;background:rgba(10,12,24,.94);color:#c8ffee;font:12px/1.5 ui-monospace,monospace;border-left:2px solid #00ffcc;padding:12px;pointer-events:auto;box-shadow:-4px 0 24px rgba(0,0,0,.45);box-sizing:border-box;z-index:2147483647";
-        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>💬 webclaw chat <span style='color:#8fa3b8;font-weight:400;font-size:10px'>— 이 탭의 대화</span></div><div class='lines' style='flex:1;overflow-y:auto'></div>";
+        panel.innerHTML = "<div style='color:#00ffcc;font-weight:700;margin-bottom:6px'>💬 webclaw chat <span style='color:#8fa3b8;font-weight:400;font-size:10px'>— 이 사이트의 대화 · 승인은 사이드 패널에서</span></div><div class='lines' style='flex:1;overflow-y:auto'></div>";
         // #11 — two-way chat: the human can instruct the agent from the page.
         const input = document.createElement("input");
         input.className = "chat";
         input.placeholder = "에이전트에게 지시… (Enter)";
         input.style.cssText = "margin-top:8px;padding:6px 8px;border:1px solid #00ffcc;border-radius:7px;background:rgba(0,0,0,.5);color:#c8ffee;font:11px ui-monospace,monospace;outline:none";
+        // S1 — the input sits in the page's DOM, so page scripts can dispatch
+        // synthetic key events or rewrite .value. Only a real (isTrusted)
+        // Enter sends, and only the text the human actually typed: the value
+        // must equal what the last trusted input event left there.
+        let typed = "";
+        input.addEventListener("input", (ev) => { if (ev.isTrusted) typed = input.value; });
         input.addEventListener("keydown", (ev) => {
-          if (ev.key !== "Enter" || !input.value.trim()) return;
+          if (!ev.isTrusted || ev.key !== "Enter" || ev.isComposing || !input.value.trim()) return;
           ev.stopPropagation();
+          if (input.value !== typed) { input.value = ""; typed = ""; return; } // tampered by the page
           const t = input.value.trim();
-          input.value = "";
-          try { chrome.runtime.sendMessage({ type: "hudChat", text: t, url: location.href }); } catch (e) {}
+          input.value = ""; typed = "";
+          try { chrome.runtime.sendMessage({ type: "hudChat", text: t }); } catch (e) {}
         });
         input.addEventListener("keydown", (ev) => ev.stopPropagation());
         input.addEventListener("keyup", (ev) => ev.stopPropagation());
@@ -954,6 +1106,13 @@ function wcActInjected(action, selector, value, code, cap) {
   })();
 }
 
+// "[FILL] #pw → filled (6 chars)" — length only, never the value.
+function wcSecretHud(reason, value) {
+  const n = String(value == null ? "" : value).length;
+  if (reason === "no_match" || reason === "stale_ref") return reason;
+  return (reason === "value_mismatch" ? "filled, page kept a different value" : "filled") + " (" + n + " chars)";
+}
+
 function wcCapStr(s) {
   s = typeof s === "string" ? s : JSON.stringify(s);
   if (s === undefined) s = "undefined";
@@ -974,7 +1133,7 @@ const WC_MUTATING = new Set(["click", "clicktext", "diff", "fill", "type", "subm
 
 async function wcAct(msg) {
   const tab = await pickTab(msg.urlMatch);
-  if (!tab) return { text: "(no target tab)" };
+  if (!tab) return { text: "(no target tab)", failed: true, reason: "no_tab" };
   await waitTabReady(tab.id); // #4
   if (WC_MUTATING.has(msg.action)) { const blocked = await spBlock(tab); if (blocked) return blocked; }
   // v0.9.0 — human policy: deny list, ask mode, risky-action confirmation
@@ -993,7 +1152,7 @@ async function wcAct(msg) {
   // extension-opened tabs regardless.
   if (msg.action === "close") {
     try { await chrome.tabs.remove(tab.id); return { text: "closed tab " + tab.id }; }
-    catch (e) { return { text: "close error: " + e }; }
+    catch (e) { return { text: "close error: " + e, failed: true, reason: "close_error" }; }
   }
   // [SHOT] [<relative/path.jpg>] — screenshot the target tab, saved to disk
   // through the same queue as [DOWNLOAD]. v0.7.0: CDP capture first (works on
@@ -1011,10 +1170,11 @@ async function wcAct(msg) {
         await new Promise((r) => setTimeout(r, 300));
         dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
       }
-      const text = (await queueDownload(dataUrl, path)) + via;
-      hudNotify(tab.id, "📸 " + text.slice(0, 140), null, true);
-      return { text };
-    } catch (e) { return { text: "shot error: " + e }; }
+      const res = await queueDownload(dataUrl, path);
+      const text = res.text + via;
+      hudNotify(tab.id, "📸 " + wcDownloadMirror(res), null, true);
+      return res.failed ? { text, failed: true, reason: res.reason } : { text };
+    } catch (e) { return { text: "shot error: " + e, failed: true, reason: "shot_error" }; }
   }
   // [SAY] <text> — master's reply rendered into the HUD chat panel. (#11)
   if (msg.action === "say") {
@@ -1110,7 +1270,7 @@ async function wcAct(msg) {
     }
   } catch (e) {
     if (r.ref && /document|frame/i.test(String(e))) return { text: "(stale ref: " + r.ref + " — run [OUTLINE] again)", failed: true, reason: "stale_ref" };
-    return { text: "act error: " + e };
+    return { text: "act error: " + e, failed: true, reason: "act_error" };
   }
   // #16 — [DIFF] ... :: screenshot — attach a visual capture alongside the
   // structured DOM diff, for cases the diff alone can't judge (layout
@@ -1124,7 +1284,7 @@ async function wcAct(msg) {
         await new Promise((res) => setTimeout(res, 200));
         dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
       }
-      const shotText = await queueDownload(dataUrl, "webclaw-shots/diff-" + Date.now() + ".jpg");
+      const shotText = (await queueDownload(dataUrl, "webclaw-shots/diff-" + Date.now() + ".jpg")).text;
       const j = JSON.parse(out);
       j.screenshot = shotText;
       out = JSON.stringify(j);
@@ -1142,24 +1302,29 @@ async function wcAct(msg) {
   // cursor when the click reported its coordinates).
   const cm = out.match(/@(\d+),(\d+)$/);
   if ((msg.action === "click" || msg.action === "clicktext") && cm) click = { x: +cm[1], y: +cm[2] };
-  hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (r.ref || msg.selector || msg.value || (code || "").slice(0, 60)) + " → " + out.slice(0, 90), click, true); // working
+  // S6 — fill/type values (passwords!) never reach the HUD log: that log is
+  // page DOM, and history the next page in this tab must not inherit.
+  const secret = msg.action === "fill" || msg.action === "type";
+  const hudOut = secret ? wcSecretHud(reason, msg.value) : out.slice(0, 90);
+  hudNotify(tab.id, "[" + msg.action.toUpperCase() + "] " + (secret ? label : (r.ref || msg.selector || msg.value || (code || "").slice(0, 60))) + " → " + hudOut, click, true); // working
   return reason ? { text: out, failed: true, reason } : { text: out };
 }
 
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "act") return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "act" || !wcExt(sender)) return;
   wcAct(msg).then(async (resp) => {
     // audit + recording, then minimal-CDP mode detaches right away
     if (msg._tab) await gdAuditAct(msg, msg._tab, resp);
     if (msg._tab && await WcCdp.minimal() && WcCdp.isAttached(msg._tab.id) && !wcRelayTabs.has(msg._tab.id)) WcCdp.detach(msg._tab.id);
     sendResponse(resp);
-  }, (e) => sendResponse({ text: "act error: " + e }));
+  }, (e) => sendResponse({ text: "act error: " + e, failed: true, reason: "act_error" }));
   return true; // async
 });
 
 // v0.7.0 — Spaces / hand-off, learnings.
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || (msg.type !== "space" && msg.type !== "learn" && msg.type !== "learnContext")) return;
+  if (!wcExt(sender)) return;
   (async () => {
     if (msg.type === "space") return spHandle(msg);
     if (msg.type === "learn") return lnHandle(msg);
@@ -1205,16 +1370,47 @@ async function wmRegister() {
 }
 wmRegister();
 
-function wmInjected(op, name, args) {
-  const tools = window[Symbol.for("webclaw.webmcp")];
-  if (!tools) return Promise.resolve({ error: "webclaw WebMCP shim not present on this page (reload the tab after enabling)" });
-  if (op === "list") return Promise.resolve({ tools: [...tools.values()].map((t) => ({ name: t.name, description: t.description || "", inputSchema: t.inputSchema || {} })) });
-  const t = tools.get(name);
-  if (!t) return Promise.resolve({ error: "no such WebMCP tool: " + name, available: [...tools.keys()] });
-  const client = { requestUserInteraction: async (cb) => cb() };
-  return Promise.resolve().then(() => t.execute(args || {}, client)).then(
-    (r) => ({ result: r === undefined ? null : JSON.parse(JSON.stringify(r)) }),
-    (e) => ({ error: String((e && e.message) || e) }));
+// A9 — the shim keeps its registry in a closure; this MAIN-world function
+// reaches it through the shim's document CustomEvent handshake, keyed with a
+// per-install secret (see webmcp-shim.js). Replies are JSON-safe objects:
+// { tools } · { result } · { error } · { interaction: callId } (tool paused
+// on requestUserInteraction — background asks the human, then op "resume").
+function wmInjected(key, op, payload) {
+  const d = Object.assign({ key, op, reply: null }, payload || {});
+  try { document.dispatchEvent(new CustomEvent("webclaw:webmcp", { detail: d })); } catch (e) {}
+  if (!d.reply) return Promise.resolve({ error: "webclaw WebMCP shim not present on this page (reload the tab after enabling)" });
+  return Promise.resolve(d.reply).then((r) => JSON.parse(JSON.stringify(r || {})), (e) => ({ error: String((e && e.message) || e) }));
+}
+
+async function wmKey() {
+  let { wmKey } = await chrome.storage.local.get("wmKey");
+  if (!wmKey) {
+    wmKey = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    await chrome.storage.local.set({ wmKey });
+  }
+  return wmKey;
+}
+
+// list / call one WebMCP tool; requestUserInteraction → human approval
+// (always asked, in any policy mode — never auto-confirmed).
+async function wmCall(tab, msg) {
+  const key = await wmKey();
+  const exec = async (op, payload) => {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: wmInjected, args: [key, op, payload] });
+    return (res && res.result) || { error: "no result from the page" };
+  };
+  if (msg.arg === "list") return exec("list", {});
+  let r = await exec("call", { name: msg.tool || "", args: msg.args || {} });
+  let declined = false;
+  for (let i = 0; r && r.interaction; i++) {
+    if (i >= 5) { await exec("resume", { callId: r.interaction, allow: false }); return { error: "too many user-interaction requests", reason: "interaction_denied" }; }
+    const ans = await gdAsk(tab.id, gdHost(tab.url), "[WEBMCP] " + (msg.tool || "") + " — 페이지 도구가 사용자 확인(requestUserInteraction)을 요청", true);
+    const allow = ans === "allow" || ans === "allow-site";
+    if (!allow) declined = true;
+    r = await exec("resume", { callId: r.interaction, allow });
+  }
+  if (declined && r && r.error) r.reason = "interaction_denied";
+  return r;
 }
 
 async function gdHandle(msg) {
@@ -1225,7 +1421,7 @@ async function gdHandle(msg) {
     if (!html) return { text: "(nothing recorded — [REC] on first)", failed: true, reason: "no_recording" };
     const path = msg.arg || ("webclaw-replays/replay-" + Date.now() + ".html");
     const b64 = btoa(unescape(encodeURIComponent(html)));
-    return { text: await queueDownload("data:text/html;base64," + b64, path) };
+    return await queueDownload("data:text/html;base64," + b64, path);
   }
   if (msg.op === "policy") {
     const p = await gdPolicy();
@@ -1242,22 +1438,29 @@ async function gdHandle(msg) {
   }
   if (msg.op === "webmcp") {
     const tab = await pickTab(msg.urlMatch);
-    if (!tab) return { text: "(no target tab)" };
+    if (!tab) return { text: "(no target tab)", failed: true, reason: "no_tab" };
     const gate = await gdCheck({ url: tab.url, tabId: tab.id, mutating: msg.arg === "call", what: "[WEBMCP] call " + (msg.tool || ""), label: msg.tool });
     if (gate) return gate;
-    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: wmInjected, args: [msg.arg, msg.tool || "", msg.args || {}] });
-    const r = (res && res.result) || {};
-    gdRecordAll({ kind: "webmcp", action: msg.arg, target: msg.tool || "", host: gdHost(tab.url), mutating: msg.arg === "call", result: r.error ? "failed" : "ok" }, tab);
-    if (r.error) return { text: JSON.stringify(r), failed: true, reason: "webmcp_error" };
+    let r;
+    try { r = await wmCall(tab, msg); } catch (e) { r = { error: "webmcp error: " + ((e && e.message) || e) }; }
+    gdRecordAll({ kind: "webmcp", action: msg.arg, target: msg.tool || "", host: gdHost(tab.url), mutating: msg.arg === "call", result: r.error ? "failed" : "ok", reason: r.reason }, tab);
+    if (r.error) return { text: JSON.stringify(r), failed: true, reason: r.reason || "webmcp_error" };
     return { text: JSON.stringify(msg.arg === "list" ? r.tools : r.result) };
   }
   return { text: "(unknown guard op: " + msg.op + ")", failed: true, reason: "bad_args" };
 }
 
-chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-  if (!msg || msg.type !== "guard") return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "guard" || !wcExt(sender)) return;
   gdHandle(msg).then(sendResponse, (e) => sendResponse({ text: String((e && e.message) || e), failed: true, reason: "error" }));
   return true; // async
 });
 // the human toggled WebMCP in the popup → (un)register the shim
 chrome.storage.onChanged.addListener((ch, area) => { if (area === "local" && ch.prefs) wmRegister(); });
+
+// A12 / B — every service-worker start: expire approvals whose waiting caller
+// died with the previous worker, re-adopt relayed tabs and detach orphaned
+// debugger sessions, and drop HUD conversations of tabs that are gone.
+gdExpireOrphans().catch((e) => console.warn("approval restore", e));
+wcRelayRestore().catch((e) => console.warn("relay restore", e));
+hudPrune().catch(() => {});

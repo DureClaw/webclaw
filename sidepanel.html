@@ -28,6 +28,11 @@
   .row button{border:0;border-radius:11px;padding:0 16px;font-weight:700;cursor:pointer;background:linear-gradient(90deg,var(--cyan),#38bdf8);color:#04121a}
   .mode-aside{display:flex;gap:1px;padding:4px;background:#0a0c18;border-bottom:1px solid rgba(0,255,204,.12)}
   .mode-btn{flex:1;border:1px solid rgba(0,255,204,.2);background:transparent;color:#8fa9bd;padding:7px 4px;font-size:11px;cursor:pointer;border-radius:6px}
+  #approvals{display:none;padding:8px 10px;border-bottom:1px solid rgba(255,0,255,.35);background:rgba(225,29,72,.12)}
+  .ap{font:12px/1.45 ui-monospace,monospace;margin:4px 0 8px;word-break:break-all}
+  .ap .q{color:#ffd166;margin-bottom:6px} .ap .btns{display:flex;gap:6px}
+  .ap button{flex:1;border:1px solid var(--cyan);background:rgba(0,255,204,.12);color:#eafff9;border-radius:7px;padding:6px 4px;font-size:11px;cursor:pointer}
+  .ap button.deny{border-color:#e11d48;background:rgba(225,29,72,.18)}
   .mode-btn.active{background:rgba(0,255,204,.16);color:#eafff9;font-weight:700;border-color:var(--cyan)}
 </style></head><body>
   <div class="top"><span class="b">◇ <span id="brandText">Wide Worker</span></span>
@@ -36,6 +41,7 @@
     <button id="modeBus" class="mode-btn">Bus (버스)</button>
     <button id="modeWorker" class="mode-btn active">Wide Worker (단독)</button>
   </div>
+  <div id="approvals"></div>
   <div class="tasks" id="tasks"><span class="add" id="add">＋ 새 작업</span></div>
   <div class="log" id="log"></div>
   <div class="row"><input id="in" placeholder="지시를 입력하세요…" autofocus><button id="send">↵</button></div>

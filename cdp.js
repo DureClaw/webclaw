@@ -17,9 +17,12 @@ const WcCdp = (() => {
   const attached = new Map(); // tabId → idle-detach timer
   const refusedUntil = new Map(); // tabId → epoch ms (user cancelled the bar)
 
-  // Raw [CDP] calls that would dump credentials for *every* site, or reach
-  // outside the target tab, are refused by default (cfg.cdpDeny overrides).
-  const DEFAULT_DENY = ["Network.getAllCookies", "Network.getCookies", "Storage.getCookies", "Browser.", "Target.", "SystemInfo."];
+  // Raw [CDP] calls that would dump or rewrite credentials for *every* site
+  // (cookie jars are browser-wide, not per tab), or reach outside the target
+  // tab, are refused by default (cfg.cdpDeny overrides).
+  const DEFAULT_DENY = ["Network.getAllCookies", "Network.getCookies", "Storage.getCookies", "Browser.", "Target.", "SystemInfo.",
+    "Network.clearBrowserCookies", "Network.setCookie", "Network.setCookies", "Network.deleteCookies",
+    "Storage.clearDataForOrigin", "Storage.clearCookies", "Storage.setCookies"];
 
   function available() { return typeof chrome !== "undefined" && !!chrome.debugger; }
 
@@ -144,7 +147,7 @@ const WcCdp = (() => {
     return true;
   }
 
-  return { available, enabled, minimal, pin, isAttached, send, denied, click, insertText, screenshot, evaluate, setFiles, detach };
+  return { available, enabled, minimal, pin, isAttached, send, denied, click, insertText, screenshot, evaluate, setFiles, detach, DEFAULT_DENY };
 })();
 
 // document.querySelector that also descends into open shadow roots. Used both
