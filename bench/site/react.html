@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>Controlled input</title>
+<h1>Newsletter</h1>
+<input id="email" placeholder="Email address"><button id="sub" disabled>Subscribe</button><p id="out"></p>
+<script>
+// framework-style controlled input: state only changes through input events
+let state = ""; const e = document.getElementById("email"), b = document.getElementById("sub");
+e.addEventListener("input", () => { state = e.value; b.disabled = !/^[^@]+@[^@]+$/.test(state); });
+b.onclick = () => { document.getElementById("out").textContent = "subscribed " + state; };
+</script>

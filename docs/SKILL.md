@@ -15,6 +15,20 @@ webclaw는 Chrome 확장 형태의 DureClaw 플릿 노드다. **사용자의 로
       마스터(이 세션) — 판단·마커 디스패치·결과 회신
 ```
 
+## 0-a. 가장 쉬운 길 (v0.8.0): CLI/MCP
+
+`node ~/dev/webclaw/bin/webclaw.cjs doctor` 한 줄로 설정·버스·인증·노드·왕복을 전부 확인한다. 이후 `webclaw do "[마커]"`, `webclaw run flow.js`, 또는 MCP(`claude mcp add webclaw -- node ~/dev/webclaw/bin/webclaw.cjs mcp`)의 `webclaw_*` 도구를 쓰면 아래 curl 디스패치·폴링을 직접 할 필요가 없다. 노드 자동 선택(1개일 때), 구버전 버스 task_id 처리, 실패 reason 승격이 내장돼 있다. 서버 없이 쓰려면 `webclaw setup --standalone`(로컬 미니버스).
+
+## 0-b. v0.9.0 — 정책·감사·녹화·릴레이·WebMCP·신원
+
+- **정책은 사람만 설정**(팝업 🛡️): deny 도메인 → `policy_denied`, ask 모드 → HUD에 승인 요청이 뜨고 사용자가 채팅 `/allow`·`/allow-site`·`/deny`로 답한다(120초 → `approval_timeout`). `confirmRisky`면 결제·삭제·송금처럼 보이는 동작은 매번 승인. 마스터는 `[POLICY]`로 읽기만 가능 — 거절은 우회하지 말고 사용자에게 보고.
+- `[AUDIT] [n]` 감사 로그 · `[REC] on <라벨>` … `[REC] off` → `[REPLAY]` HTML 타임라인(단계별 스크린샷) 다운로드.
+- `[RUN]` 첫 줄 `// @save <도메인>/<이름>` → 성공 시 레시피 자동 저장. `webclaw learnings push|pull`(레지스트리)·`export|import`(파일).
+- `[WEBMCP] list` / `[WEBMCP] call <tool> {json}` — 페이지의 WebMCP 도구를 어떤 에이전트에든 중계.
+- `[IDENTITY] init` → Ed25519 키, 팝업에서 켜면 `[FETCH]`에 Web Bot Auth 서명.
+- standalone 모드: `webclaw cdp-url` → Puppeteer `connect` / Playwright `connectOverCDP` 그대로 사용(Space "cdp" 탭만 노출).
+- CDP 모드(팝업): auto / minimal(필요할 때만 붙고 즉시 해제) / off.
+
 ## 0. 연결 확인 (항상 먼저)
 
 ```bash

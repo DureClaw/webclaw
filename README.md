@@ -133,6 +133,99 @@ falls back to the scripting path. Sessions auto-detach after 30 s idle so the ba
 The node appears in the fleet's presence; a master can fan-out tasks to it, and the
 popup shows a live task feed.
 
+## Use from any agent — MCP · CLI · skill (v0.8.0)
+
+No DureClaw server required: **standalone mode** runs a tiny local bus (`127.0.0.1:4777`,
+loopback-only, secret-protected, refuses WebSocket upgrades from web-page origins) that the
+extension joins like a real bus. Zero npm dependencies, Node 22+.
+
+```bash
+node bin/webclaw.cjs setup --standalone   # writes ~/.webclaw/config.json + the extension's config.local.json
+# chrome://extensions → reload webclaw (popup-saved settings win over config.local.json — enter the same values there)
+node bin/webclaw.cjs doctor               # ✓ config ✓ bus health ✓ auth + join ✓ webclaw nodes ✓ round-trip
+claude mcp add webclaw -- node "$PWD/bin/webclaw.cjs" mcp
+codex  mcp add webclaw -- node "$PWD/bin/webclaw.cjs" mcp
+npx skills add DureClaw/webclaw           # agent-facing guide: skills/webclaw/SKILL.md
+```
+
+Already on a DureClaw bus? `webclaw setup` (bus mode) reuses `config.local.json`; everything
+below works the same against either bus. The mini-bus auto-starts in the background on first
+use (`webclaw up` / `down`, log in `~/.webclaw/minibus.log`).
+
+**MCP tools** — `webclaw_nodes`, `webclaw_tabs`, `webclaw_open` {url, space}, `webclaw_outline`,
+`webclaw_click` {target: "@N"|css}, `webclaw_type`, `webclaw_read`, `webclaw_run` {script},
+`webclaw_marker` (any marker: `[SPACE]`, `[HANDOFF]`, `[SHOT]`, `[WAIT]`, `[CDP]`…),
+`webclaw_say`, `webclaw_inbox` (the human's HUD chat, e.g. `/done` after a hand-off). Each tool
+is one marker; failures return `isError` with `[reason] …`. `tab` = URL substring or
+`space:<name>`; `node` picks a browser when several are joined (one is auto-selected).
+
+**CLI** — `webclaw nodes` · `webclaw do "<marker>"` · `webclaw run flow.js [--tab space:job]` ·
+`webclaw inbox` · `--node`, `--timeout`, `--json`. Exit code 1 + `[reason]` on stderr on failure.
+
+## Guard rails, replay, relay, WebMCP, identity (v0.9.0)
+
+**Policy & approval (human-set only)** — popup "🛡️ 정책" or `config.local.json` `"policy"`;
+markers can read it (`[POLICY]`), never change it.
+- `deny: [domains]` — off-limits for reads, actions, `[OPEN]`, `[FETCH]`, `[DOWNLOAD]`, relay (`reason: policy_denied`).
+- `mode: "ask"` — the first mutating action per site asks in the page HUD; the human answers in the
+  HUD chat `/allow` (once) · `/allow-site` (this site, this browser session) · `/deny`
+  (`approval_denied`; 120 s → `approval_timeout`). `allow: [domains]` skips asking. Reads are never gated.
+- `confirmRisky: true` — pay / delete / transfer-looking clicks & submits (결제·삭제·송금…) ask every time.
+- **Audit log** — every handled marker, result, reason and approval: `[AUDIT] [n]` (ring buffer of 1000).
+
+**Recording / replay** — `[REC] on [label]` … `[REC] off`, then `[REPLAY] [path.html]`: a
+self-contained HTML timeline (time, action, target, result, a screenshot per step) saved to Downloads.
+
+**CDP modes** — `prefs.cdp`: `auto` (default — trusted input, background capture), `minimal`
+(CDP only when required — `[CDP]`, `[UPLOAD]`, CSP-blocked `[JS]` — and detach right after, so the
+"debugging" bar only flashes for those moments), `off`.
+
+**CDP endpoint (standalone)** — unmodified CDP clients drive the node through the mini-bus:
+```js
+const url = execSync("webclaw cdp-url").toString().trim();   // http://127.0.0.1:4777/cdp/<secret>
+const browser = await puppeteer.connect({ browserURL: url, defaultViewport: null });
+const page = await browser.newPage();                         // opens in the agent Space "cdp"
+// or: const browser = await chromium.connectOverCDP(url); const page = await browser.contexts()[0].newPage();
+```
+Browser-level `Target`/`Browser` domains are emulated; page traffic goes through `chrome.debugger`
+with real target ids (Playwright needs target id == main frame id). Exposes only the "cdp" Space's
+tabs unless `prefs.relayScope = "all"`; new browser contexts are refused (it's the real profile);
+`Browser.close` only disconnects. Raw-`[CDP]` deny list + policy deny list apply.
+
+**Learnings, shared** — a `[RUN]` whose first line is `// @save <domain>/<name>` saves itself as a
+recipe once it succeeds. `[LEARNINGS] export | import\n<json>`; CLI `webclaw learnings export [file]
+| import <file> | push [name] | pull [name]` (push/pull use the bus skill registry
+`/api/skill-registry` — the mini-bus implements it; buses without it get a clear `no_registry`).
+
+**WebMCP relay** — a MAIN-world shim records tools a page registers via `navigator.modelContext`
+(wrapping native WebMCP, polyfilling it otherwise); `[WEBMCP] list` / `[WEBMCP] call <tool> {json}`
+(MCP: `webclaw_webmcp_list` / `webclaw_webmcp_call`) relay them to *any* agent. `prefs.webmcp = "off"` disables.
+
+**Agent identity** — `[IDENTITY] init` creates an Ed25519 key; with `identity.on` (popup) the
+extension's own `[FETCH]` requests carry Web Bot Auth style HTTP Message Signatures
+(`Signature-Input`/`Signature`/`Signature-Agent`, RFC 9421, `tag="web-bot-auth"`); `[IDENTITY]`
+prints the key directory to host at `/.well-known/http-message-signatures-directory`. Page
+navigations are not signed (an extension can't sign per-request navigation headers); the draft is
+still moving, so the field set is provisional.
+
+### Benchmark
+
+`node bench/run.cjs` — 10 deterministic local tasks (form login, search+extract, 3-step wizard,
+controlled input, cross-origin iframe, shadow DOM, pagination, upload, late content, modal) × 3 reps,
+three strategies; results in [bench/results/RESULTS.md](bench/results/RESULTS.md). Latest
+(Chrome for Testing 153 headless, macOS arm64):
+
+| strategy | success | time (sum of medians) | round-trips | bytes to the agent |
+|---|---|---|---|---|
+| step — one marker per tool call (outline → @ref → act) | 30/30 | 2154 ms | 41 | 3.2 KB |
+| run — whole task as one `[RUN]` | 30/30 | 2020 ms | **10** | **0.4 KB** |
+| relay — Puppeteer via the CDP endpoint | 30/30 | 2221 ms | (CDP) | — |
+
+Tool-layer latency is now ~10 ms per round-trip (results are pushed over the bus socket — the
+first run, still REST-polling, measured 12.3 s for `step`); the real cost difference in an agent
+loop is the **4× fewer turns and 8× fewer bytes** of `[RUN]`. No LLM is involved, so this is not
+comparable 1:1 with LLM-in-the-loop benchmarks such as ego's.
+
 ## Tests
 
 ```bash
@@ -143,7 +236,10 @@ npm test   # offline unit tests — marker routing + failure elevation + [RUN] r
 `node:test`, zero dependencies) to cover marker parsing/routing and the
 `status`/`exit_code`/`reason` failure-elevation path without any network access;
 `test/runner.unit.test.cjs` covers the `[RUN]` script host (helper → marker mapping,
-failure reasons, args). Run them
+failure reasons, args); `test/bridge.unit.test.cjs` runs a real `core.js` node against an
+in-process mini-bus and exercises the REST client, auth/origin refusal and the MCP server
+end to end; `test/v09.unit.test.cjs` covers Web Bot Auth signing (incl. the RFC 8037 thumbprint
+vector), the v0.9 markers, the registry and the CDP endpoint emulation. Run them
 directly, not via a bare `node --test` — that glob also picks up the live-bus script
 below, which needs a real bus and will hang without one.
 
@@ -272,6 +368,50 @@ for (let s = 0; s < 40; s++) {
 What's unique is the combination: **distributed fleet node + keyless (master-delegated LLM)
 + always-on extension + CORS-free browser hands.** The browser is a *capability the fleet
 can call* (fetch, DOM, screenshot), not the thing being automated for one user.
+
+### Reference groups (2026-10)
+
+ego lite's "Stop bouncing between browsers" table (5 groups × 11 criteria), re-scored
+from webclaw's point of view with 5 extra criteria (12–16). Group-typical scores from
+parallel web research on 2026-10-21 — ✓ yes · △ partial · ✗ no. Full analysis, per-product
+scores, predictions and sources (Korean): [docs/competitive-analysis-2026-10.md](docs/competitive-analysis-2026-10.md).
+
+**Criteria** — 1 works with any AI agent · 2 uses your browser logins · 3 fewer CAPTCHAs ·
+4 whole computer · 5 doesn't hijack your browser · 6 parallel · 7 large scraping ·
+8 daily browser · 9 free · 10 data local · 11 reusable skills · **12 distributed fleet ·
+13 keyless · 14 on-page human-in-the-loop · 15 open source · 16 API for external orchestrators**
+
+| group (representative products) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **webclaw v0.9.0** | ✓ | ✓ | ✓ | △¹ | △² | ✓ | △ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓³ |
+| Browser extensions (Claude in Chrome, Codex for Chrome, Nanobrowser, Playwright MCP Bridge, HARPA) | △ | ✓ | ✓ | ✗ | △ | △ | △ | ✓ | △ | △ | △ | ✗ | △ | △ | △ | △ |
+| Built-in agent browsers (Claude Cowork, ChatGPT desktop/Work, Chrome auto browse, Manus) | ✗ | △ | △ | △ | ✓ | △ | ✗ | ✗ | ✗ | △ | ✓ | ✗ | △ | △ | ✗ | ✗ |
+| AI browsers (Comet, Dia, Opera Neon, Edge, Genspark/Fellou) | ✗ | ✓ | ✓ | ✗ | △ | △ | ✗ | ✓ | △ | △ | △ | ✗ | △ | ✓ | ✗ | ✗ |
+| Cloud browsers (Browserbase, Browser Use, Kernel, Steel, Cloudflare, AgentCore) | ✓ | △ | △ | ✗ | ✓ | ✓ | ✓ | ✗ | △ | ✗ | △ | △ | ✓ | ✓ | △ | ✓ |
+| Browser CLIs / MCP (playwright-cli/MCP, Chrome DevTools MCP, agent-browser, Browser Harness, Stagehand) | ✓ | △ | △ | ✗ | △ | △ | △ | ✗ | ✓ | ✓ | ✓ | ✗ | ✓ | ✗ | ✓ | ✓ |
+| Agent-native browsers (ego lite as assessed, BrowserOS neo, Lightpanda, Donut) | ✓ | △ | △ | ✗ | ✓ | ✓ | △ | △ | ✓ | ✓ | ✗⁴ | ✗ | ✓ | ✓ | △ | △ |
+
+¹ browser only — whole-computer reach comes from other DureClaw fleet nodes (shell/desktop).
+² Spaces keep the user's tab, but CDP shows Chrome's "debugging" bar; no true context isolation from an extension.
+³ REST/WebSocket bus + (v0.8.0) MCP server, CLI and `npx skills add` — the #1 gap from this analysis, now closed.
+⁴ ego's own table claims ✓ on all 11; assessed: 4 and 11 ✗ (skills still "coming soon"), 2·3·7·8 △.
+
+**Where it lands**
+
+| | |
+|---|---|
+| commoditizing within ~12 months | 5 no-hijack · 6 parallel (everyone converges on CDP + agent tab groups) · 14 hand-off (Cloudflare handoff API, Browser Use takeover) · 2 logins (cloud profiles, Chrome autoConnect) · 11 skills |
+| durable differentiator | the **combination** 12 fleet + 13 keyless + 1 any agent + real Chrome with no migration + 15 open source — no group has it |
+| biggest gaps | ~~no MCP/CLI/skill install path~~ · ~~bus/master setup friction~~ (v0.8.0) · ~~no public benchmark~~ · ~~no policy layer~~ · ~~no session replay~~ (v0.9.0) — left: Web Store distribution, an LLM-in-the-loop benchmark on live sites |
+| top threats | vendor extensions/desktop browsers taking the same surface (Atlas shut down, Claude in Chrome GA) · cloud "sync your local login" · Chrome tightening `chrome.debugger` |
+
+**Positioning** — *the real-browser control plane for agent teams*: no browser switch, any
+agent, many machines' real logged-in sessions on one bus, a human supervising on the page.
+Hybrid with cloud browsers: discover/scale in the cloud, act on the edge.
+
+**Done** — ~~P0 MCP/CLI/skill, standalone~~ (v0.8.0) · ~~P1 benchmark, policy layer, replay~~ ·
+~~P2 CDP endpoint, shared learnings + self-saving recipes, minimal-CDP mode~~ · ~~P3 WebMCP relay,
+Web Bot Auth identity~~ (v0.9.0). Report: [docs/report-p1-p3-2026-10.md](docs/report-p1-p3-2026-10.md).
 
 ## Roadmap
 

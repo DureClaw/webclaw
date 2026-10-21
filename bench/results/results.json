@@ -1,0 +1,312 @@
+{
+  "meta": {
+    "date": "2026-10-20T17:13:33.223Z",
+    "webclaw": "0.9.0",
+    "node": "v26.8.1",
+    "reps": 3,
+    "mode": "standalone",
+    "label": "Google Chrome for Testing 153.0.8010.12, headless, macOS arm64 (arm64)"
+  },
+  "rows": [
+    {
+      "task": "login",
+      "title": "Log in through a form",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 75,
+      "trips": 5,
+      "bytes": 293,
+      "errors": []
+    },
+    {
+      "task": "login",
+      "title": "Log in through a form",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 42,
+      "trips": 1,
+      "bytes": 36,
+      "errors": []
+    },
+    {
+      "task": "login",
+      "title": "Log in through a form",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 95,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "search",
+      "title": "Search and extract result rows",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 44,
+      "trips": 4,
+      "bytes": 293,
+      "errors": []
+    },
+    {
+      "task": "search",
+      "title": "Search and extract result rows",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 37,
+      "trips": 1,
+      "bytes": 106,
+      "errors": []
+    },
+    {
+      "task": "search",
+      "title": "Search and extract result rows",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 72,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "wizard",
+      "title": "3-step wizard (radio, select, checkbox)",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 119,
+      "trips": 9,
+      "bytes": 739,
+      "errors": []
+    },
+    {
+      "task": "wizard",
+      "title": "3-step wizard (radio, select, checkbox)",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 92,
+      "trips": 1,
+      "bytes": 33,
+      "errors": []
+    },
+    {
+      "task": "wizard",
+      "title": "3-step wizard (radio, select, checkbox)",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 147,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "controlled-input",
+      "title": "Framework-controlled input enables a button",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 50,
+      "trips": 3,
+      "bytes": 250,
+      "errors": []
+    },
+    {
+      "task": "controlled-input",
+      "title": "Framework-controlled input enables a button",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 40,
+      "trips": 1,
+      "bytes": 47,
+      "errors": []
+    },
+    {
+      "task": "controlled-input",
+      "title": "Framework-controlled input enables a button",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 71,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "cross-origin-iframe",
+      "title": "Click inside a cross-origin iframe",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 38,
+      "trips": 3,
+      "bytes": 262,
+      "errors": []
+    },
+    {
+      "task": "cross-origin-iframe",
+      "title": "Click inside a cross-origin iframe",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 34,
+      "trips": 1,
+      "bytes": 36,
+      "errors": []
+    },
+    {
+      "task": "cross-origin-iframe",
+      "title": "Click inside a cross-origin iframe",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 46,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "shadow-dom",
+      "title": "Button inside an open shadow root",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 33,
+      "trips": 2,
+      "bytes": 176,
+      "errors": []
+    },
+    {
+      "task": "shadow-dom",
+      "title": "Button inside an open shadow root",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 38,
+      "trips": 1,
+      "bytes": 34,
+      "errors": []
+    },
+    {
+      "task": "shadow-dom",
+      "title": "Button inside an open shadow root",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 46,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "pagination",
+      "title": "Collect 30 items across 3 pages",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 103,
+      "trips": 7,
+      "bytes": 568,
+      "errors": []
+    },
+    {
+      "task": "pagination",
+      "title": "Collect 30 items across 3 pages",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 75,
+      "trips": 1,
+      "bytes": 22,
+      "errors": []
+    },
+    {
+      "task": "pagination",
+      "title": "Collect 30 items across 3 pages",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 108,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "upload",
+      "title": "Attach a local file",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 34,
+      "trips": 2,
+      "bytes": 208,
+      "errors": []
+    },
+    {
+      "task": "upload",
+      "title": "Attach a local file",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 24,
+      "trips": 1,
+      "bytes": 59,
+      "errors": []
+    },
+    {
+      "task": "upload",
+      "title": "Attach a local file",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 42,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "delayed",
+      "title": "Wait for late content and read it",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 1576,
+      "trips": 2,
+      "bytes": 49,
+      "errors": []
+    },
+    {
+      "task": "delayed",
+      "title": "Wait for late content and read it",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 1577,
+      "trips": 1,
+      "bytes": 46,
+      "errors": []
+    },
+    {
+      "task": "delayed",
+      "title": "Wait for late content and read it",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 1518,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    },
+    {
+      "task": "modal",
+      "title": "Confirm inside a modal dialog",
+      "strategy": "step",
+      "success": "3/3",
+      "ms": 82,
+      "trips": 4,
+      "bytes": 407,
+      "errors": []
+    },
+    {
+      "task": "modal",
+      "title": "Confirm inside a modal dialog",
+      "strategy": "run",
+      "success": "3/3",
+      "ms": 61,
+      "trips": 1,
+      "bytes": 36,
+      "errors": []
+    },
+    {
+      "task": "modal",
+      "title": "Confirm inside a modal dialog",
+      "strategy": "relay",
+      "success": "3/3",
+      "ms": 76,
+      "trips": 0,
+      "bytes": 0,
+      "errors": []
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>Paged list</title>
+<h1>Inventory</h1><ul id="items"></ul><button id="next">Next page</button><p id="pg"></p>
+<script>
+let page = 1; const N = 3;
+const render = () => { document.getElementById("items").innerHTML = Array.from({ length: 10 }, (_, i) => `<li>item-${(page - 1) * 10 + i + 1}</li>`).join("");
+  document.getElementById("pg").textContent = "page " + page + "/" + N; document.getElementById("next").disabled = page >= N; };
+document.getElementById("next").onclick = () => { if (page < N) { page++; render(); } };
+render();
+</script>

@@ -2,7 +2,7 @@
 // offscreen document that holds the persistent bus WebSocket.
 
 // v0.7.0 modules: CDP layer, @ref outline, agent Spaces, site learnings.
-importScripts("cdp.js", "refs.js", "spaces.js", "learn.js");
+importScripts("cdp.js", "refs.js", "spaces.js", "learn.js", "guard.js", "identity.js", "relay.js");
 
 const CAP = 2000000; // raised for large grading pages (2MB)
                     // task.result frame is fine (screenshots already send ~262KB).
@@ -28,7 +28,7 @@ function ensureOffscreen(force = false) {
     }
     try {
       await chrome.offscreen.createDocument({
-        url: "offscreen.html?v=0.7.0",
+        url: "offscreen.html?v=0.9.0",
         reasons: ["BLOBS"],
         justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
       });
@@ -202,10 +202,20 @@ chrome.runtime.onMessage.addListener((msg) => {
 // forward to the offscreen node, which publishes it into the per-node inbox
 // slot on the bus (task_id "hud-inbox-<node>") for the orchestrator to poll.
 // Read effective config (chrome.storage.cfg, else bundled config.local.json).
+// v0.9.0 — human "prefs" from the popup (cdp mode, relay scope, webmcp) win
+// over the connection config; the bundled file read is cached briefly since
+// policy/CDP checks now consult the config on every action.
+let wcFileCfg = null, wcFileCfgAt = 0;
 async function readCfg() {
-  let { cfg } = await chrome.storage.local.get("cfg");
-  if (!cfg) { try { cfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) {} }
-  return cfg || {};
+  let { cfg, prefs } = await chrome.storage.local.get(["cfg", "prefs"]);
+  if (!cfg) {
+    if (!wcFileCfg || Date.now() - wcFileCfgAt > 3000) {
+      try { wcFileCfg = await (await fetch(chrome.runtime.getURL("config.local.json"))).json(); } catch (e) { wcFileCfg = {}; }
+      wcFileCfgAt = Date.now();
+    }
+    cfg = wcFileCfg;
+  }
+  return Object.assign({}, cfg || {}, prefs || {});
 }
 
 // Standalone brain call: ask the local Wide Worker brain to turn a chat line
@@ -253,6 +263,8 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     hudNotify(tabId, "🧑 나: " + msg.text);
     chrome.storage.local.set({ lastChatTabId: tabId });
   }
+  // v0.9.0 — /allow · /allow-site · /deny answer a pending policy approval
+  if (tabId && gdAnswer(tabId, msg.text)) return;
   // v0.7.0 — "/done" in a handed-off Space returns control to the agent and
   // tells the master (inbox) so it can resume.
   if (tabId && /^\/(done|return)\b/i.test(String(msg.text).trim())) {
@@ -354,7 +366,14 @@ async function groupWebclawTab(tab) {
 // added to the fleet's tab group so opened tabs stay clustered.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "open") return;
+  const respond = sendResponse;
+  sendResponse = (resp) => {
+    gdRecordAll({ kind: "open", target: msg.url, host: gdHost(msg.url), result: resp && resp.failed ? "failed" : "ok", reason: resp && resp.reason, out: String((resp && resp.text) || "").slice(0, 200) },
+      (resp && resp._tab) || null).then(() => { if (resp) delete resp._tab; respond(resp); });
+  };
   (async () => {
+    const gate = await gdCheck({ url: msg.url, mutating: false });
+    if (gate) return sendResponse(gate);
     // v0.7.0 — inside a Space: new tab in the unfocused agent window.
     const { space } = await spTargetOf(msg.urlMatch);
     if (space) {
@@ -365,14 +384,14 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       const tab = await spOpen(space, msg.url);
       await waitTabReady(tab.id, 20000);
       const t = await chrome.tabs.get(tab.id);
-      return sendResponse({ text: "opened in space " + space + " (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || "") });
+      return sendResponse({ text: "opened in space " + space + " (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || ""), _tab: t });
     }
     const tab = await chrome.tabs.create({ url: msg.url, active: true });
     await groupWebclawTab(tab);
     await waitTabReady(tab.id, 20000);
     const t = await chrome.tabs.get(tab.id);
     hudNotify(tab.id, "[OPEN] " + msg.url.slice(0, 80));
-    sendResponse({ text: "opened (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || "") });
+    sendResponse({ text: "opened (tab " + tab.id + "): " + (t.title || "") + " — " + (t.url || ""), _tab: t });
   })().catch((e) => sendResponse({ text: "open error: " + e }));
   return true; // async
 });
@@ -414,6 +433,11 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   pickTab(msg.urlMatch).then(async (tab) => {
     if (!tab) { sendResponse({ text: "(no target tab)" }); return; }
     await waitTabReady(tab.id); // #4
+    const gate = await gdCheck({ url: tab.url, mutating: false });
+    if (gate) { sendResponse(gate); return; }
+    const respond = sendResponse;
+    sendResponse = (resp) => gdRecordAll({ kind: "read", action: msg.mode || "dom", target: msg.query || "(page)", host: gdHost(tab.url), mutating: false,
+      result: resp && resp.failed ? "failed" : "ok", reason: resp && resp.reason }).then(() => respond(resp));
     let r;
     try { r = await wcResolve(tab, msg.query); } catch (e) { sendResponse({ text: e.message, failed: true, reason: e.reason }); return; }
     chrome.scripting.executeScript({
@@ -463,9 +487,17 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
 // [FETCH] — extension fetch bypasses page CORS via host_permissions.
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "fetch") return;
-  fetch(msg.url)
-    .then(async (r) => sendResponse({ text: await r.text() }))
-    .catch((e) => sendResponse({ text: "fetch error: " + e }));
+  (async () => {
+    const gate = await gdCheck({ url: msg.url, mutating: false });
+    if (gate) return gate;
+    // v0.9.0 — Web Bot Auth signature on our own fetches when the human enabled it
+    const headers = await idHeadersFor(msg.url);
+    const r = await fetch(msg.url, headers ? { headers } : undefined);
+    return { text: await r.text(), signed: !!headers };
+  })().then((resp) => {
+    gdRecordAll({ kind: "fetch", target: msg.url, host: gdHost(msg.url), mutating: false, result: resp.failed ? "failed" : "ok", reason: resp.reason, signed: resp.signed });
+    sendResponse(resp);
+  }, (e) => sendResponse({ text: "fetch error: " + e }));
   return true; // async
 });
 
@@ -568,12 +600,16 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
       }
       return true;
     }
+    gdCheck({ url: msg.url, mutating: false }).then((gate) => {
+    if (gate) return sendResponse(gate);
+    gdRecordAll({ kind: "download", target: msg.url, host: gdHost(msg.url), mutating: false, result: "ok", out: msg.path || "" });
     queueDownload(msg.url, msg.path).then(async (text) => {
       // Downloads are tab-independent → mirror into the conversation tab
       // with a [전체] (global) badge instead of every tab's panel.
       const { lastChatTabId } = await chrome.storage.local.get("lastChatTabId");
       if (lastChatTabId) hudNotify(lastChatTabId, "⬇️ " + text.slice(0, 140), null, true, "global");
       sendResponse({ text });
+    });
     });
   } catch (e) { sendResponse({ text: "download error: " + e }); }
   return true; // async
@@ -828,6 +864,14 @@ function wcActInjected(action, selector, value, code, cap) {
             else if (el.isContentEditable) { const rg = document.createRange(); rg.selectNodeContents(el); const sl = getSelection(); sl.removeAllRanges(); sl.addRange(rg); }
             return document.activeElement === el || el.contains(document.activeElement) ? "focused" : "(focus refused: " + selector + ")";
           }
+          if (action === "describe") {
+            // human-readable label of the target (policy: risky-action check)
+            const el = q(selector);
+            if (!el) return "";
+            const t = (el.getAttribute("aria-label") || el.value || el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+            const f = el.form || (el.tagName === "FORM" ? el : null);
+            return (t + (f && f.getAttribute("action") ? " → " + f.getAttribute("action") : "")).slice(0, 120);
+          }
           if (action === "readvalue") {
             const el = q(selector);
             return el ? JSON.stringify(valueOf(el)) : "(no match: " + selector + ")";
@@ -923,7 +967,7 @@ async function wcInject(r, action, selector, value, code) {
 
 // Trusted input & CSP-proof eval only make sense in the main frame (CDP
 // coordinates/evaluation are main-frame relative).
-async function wcCdpOk(tab, r) { return (!r || r.frameId === 0) && await WcCdp.enabled(tab.id); }
+async function wcCdpOk(tab, r, required) { return (!r || r.frameId === 0) && await WcCdp.enabled(tab.id, required); }
 
 // Actions that change page/tab state — refused on a handed-off Space.
 const WC_MUTATING = new Set(["click", "clicktext", "diff", "fill", "type", "submit", "js", "close", "cdp", "upload"]);
@@ -933,6 +977,9 @@ async function wcAct(msg) {
   if (!tab) return { text: "(no target tab)" };
   await waitTabReady(tab.id); // #4
   if (WC_MUTATING.has(msg.action)) { const blocked = await spBlock(tab); if (blocked) return blocked; }
+  // v0.9.0 — human policy: deny list, ask mode, risky-action confirmation
+  msg._tab = { id: tab.id, url: tab.url };
+  if (msg.action !== "hud") { const gate = await gdGateAct(tab, msg); if (gate) return gate; }
   // [HUD] on|off — manual toggle of the visual supervision layer. (#10)
   if (msg.action === "hud") {
     const on = String(msg.code || "").trim() !== "off";
@@ -982,7 +1029,7 @@ async function wcAct(msg) {
   }
   // [CDP] Domain.method {params} — raw protocol, deny-listed for credential dumps.
   if (msg.action === "cdp") {
-    if (!(await wcCdpOk(tab))) return { text: "(cdp unavailable — debugger permission missing, cfg.cdp off, or refused by the user)", failed: true, reason: "cdp_unavailable" };
+    if (!(await wcCdpOk(tab, null, true))) return { text: "(cdp unavailable — debugger permission missing, cfg.cdp off, or refused by the user)", failed: true, reason: "cdp_unavailable" };
     if (await WcCdp.denied(msg.method)) return { text: "(cdp method denied by policy: " + msg.method + ")", failed: true, reason: "cdp_denied" };
     try {
       const r = await WcCdp.send(tab.id, msg.method, msg.params || {});
@@ -1008,7 +1055,7 @@ async function wcAct(msg) {
 
   // [UPLOAD] — CDP only (scripting cannot set a FileList).
   if (msg.action === "upload") {
-    if (!(await wcCdpOk(tab, r))) return { text: "(upload needs CDP in the main frame — unavailable here)", failed: true, reason: "cdp_unavailable" };
+    if (!(await wcCdpOk(tab, r, true))) return { text: "(upload needs CDP in the main frame — unavailable here)", failed: true, reason: "cdp_unavailable" };
     try {
       const ok = await WcCdp.setFiles(tab.id, r.css, msg.files || []);
       if (!ok) return { text: "(no match: " + label + ")", failed: true, reason: r.ref ? "stale_ref" : "no_match" };
@@ -1057,7 +1104,7 @@ async function wcAct(msg) {
     }
     if (!out) out = relabel(await wcInject(r, msg.action, r.css, msg.value, code));
     // CSP blocked eval → retry through CDP Runtime.evaluate (no eval involved)
-    if (msg.action === "js" && /^js blocked by page CSP/.test(out) && await wcCdpOk(tab, r)) {
+    if (msg.action === "js" && /^js blocked by page CSP/.test(out) && await wcCdpOk(tab, r, true)) {
       try { out = wcCapStr(await WcCdp.evaluate(tab.id, code)); via = "cdp"; }
       catch (e) { out = "js error (via cdp): " + ((e && e.message) || e); }
     }
@@ -1101,7 +1148,12 @@ async function wcAct(msg) {
 
 chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   if (!msg || msg.type !== "act") return;
-  wcAct(msg).then(sendResponse, (e) => sendResponse({ text: "act error: " + e }));
+  wcAct(msg).then(async (resp) => {
+    // audit + recording, then minimal-CDP mode detaches right away
+    if (msg._tab) await gdAuditAct(msg, msg._tab, resp);
+    if (msg._tab && await WcCdp.minimal() && WcCdp.isAttached(msg._tab.id) && !wcRelayTabs.has(msg._tab.id)) WcCdp.detach(msg._tab.id);
+    sendResponse(resp);
+  }, (e) => sendResponse({ text: "act error: " + e }));
   return true; // async
 });
 
@@ -1116,3 +1168,96 @@ chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
   })().then(sendResponse, (e) => sendResponse({ text: String((e && e.message) || e), failed: true, reason: (e && e.reason) || "error" }));
   return true; // async
 });
+
+// ===== v0.9.0 — audit / recording / policy / identity / WebMCP =====
+
+// Web Bot Auth signing of the extension's own [FETCH] requests. Enabled by the
+// human only (popup / config.local.json "identity": {on, domains?, agentUrl?}).
+async function idSettings() {
+  const { identity } = await chrome.storage.local.get("identity");
+  const cfg = await readCfg();
+  return Object.assign({ on: false, domains: [], agentUrl: "" }, cfg.identity || {}, identity || {});
+}
+async function idKey(create) {
+  let { wbaKey } = await chrome.storage.local.get("wbaKey");
+  if (!wbaKey && create) { wbaKey = await WcIdentity.generateKey(); await chrome.storage.local.set({ wbaKey }); }
+  return wbaKey || null;
+}
+async function idHeadersFor(url) {
+  const s = await idSettings();
+  if (!s.on) return null;
+  if (s.domains && s.domains.length && !gdMatch(gdHost(url), s.domains)) return null;
+  const key = await idKey(true);
+  return WcIdentity.signRequest(url, key, { agentUrl: s.agentUrl || "" });
+}
+
+// WebMCP shim — registered as a MAIN-world document_start content script.
+async function wmRegister() {
+  const cfg = await readCfg();
+  const want = cfg.webmcp !== "off";
+  const existing = await chrome.scripting.getRegisteredContentScripts({ ids: ["webclaw-webmcp"] }).catch(() => []);
+  if (want && !existing.length) {
+    await chrome.scripting.registerContentScripts([{ id: "webclaw-webmcp", js: ["webmcp-shim.js"], matches: ["<all_urls>"],
+      runAt: "document_start", world: "MAIN", allFrames: false, persistAcrossSessions: true }]).catch((e) => console.warn("webmcp register", e));
+  } else if (!want && existing.length) {
+    await chrome.scripting.unregisterContentScripts({ ids: ["webclaw-webmcp"] }).catch(() => {});
+  }
+}
+wmRegister();
+
+function wmInjected(op, name, args) {
+  const tools = window[Symbol.for("webclaw.webmcp")];
+  if (!tools) return Promise.resolve({ error: "webclaw WebMCP shim not present on this page (reload the tab after enabling)" });
+  if (op === "list") return Promise.resolve({ tools: [...tools.values()].map((t) => ({ name: t.name, description: t.description || "", inputSchema: t.inputSchema || {} })) });
+  const t = tools.get(name);
+  if (!t) return Promise.resolve({ error: "no such WebMCP tool: " + name, available: [...tools.keys()] });
+  const client = { requestUserInteraction: async (cb) => cb() };
+  return Promise.resolve().then(() => t.execute(args || {}, client)).then(
+    (r) => ({ result: r === undefined ? null : JSON.parse(JSON.stringify(r)) }),
+    (e) => ({ error: String((e && e.message) || e) }));
+}
+
+async function gdHandle(msg) {
+  if (msg.op === "audit") return { text: await gdAuditTail(msg.arg) };
+  if (msg.op === "rec") return { text: await gdRec(msg.arg, msg.label) };
+  if (msg.op === "replay") {
+    const html = await gdReplayHtml();
+    if (!html) return { text: "(nothing recorded — [REC] on first)", failed: true, reason: "no_recording" };
+    const path = msg.arg || ("webclaw-replays/replay-" + Date.now() + ".html");
+    const b64 = btoa(unescape(encodeURIComponent(html)));
+    return { text: await queueDownload("data:text/html;base64," + b64, path) };
+  }
+  if (msg.op === "policy") {
+    const p = await gdPolicy();
+    const cfg = await readCfg();
+    return { text: JSON.stringify(Object.assign({}, p, { cdp: cfg.cdp || "auto", relayScope: cfg.relayScope || "space", webmcp: cfg.webmcp || "on",
+      identity: (await idSettings()).on ? "on" : "off", note: "policy is set by the human in the popup — markers can read it, not change it" })) };
+  }
+  if (msg.op === "identity") {
+    const key = await idKey(msg.arg === "init");
+    const s = await idSettings();
+    if (!key) return { text: JSON.stringify({ signing: s.on ? "on" : "off", key: null, hint: "[IDENTITY] init generates an Ed25519 key" }) };
+    return { text: JSON.stringify({ signing: s.on ? "on" : "off", domains: s.domains, agentUrl: s.agentUrl || null,
+      keyid: await WcIdentity.thumbprint(key.publicJwk), directory: await WcIdentity.directory(key.publicJwk) }) };
+  }
+  if (msg.op === "webmcp") {
+    const tab = await pickTab(msg.urlMatch);
+    if (!tab) return { text: "(no target tab)" };
+    const gate = await gdCheck({ url: tab.url, tabId: tab.id, mutating: msg.arg === "call", what: "[WEBMCP] call " + (msg.tool || ""), label: msg.tool });
+    if (gate) return gate;
+    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: wmInjected, args: [msg.arg, msg.tool || "", msg.args || {}] });
+    const r = (res && res.result) || {};
+    gdRecordAll({ kind: "webmcp", action: msg.arg, target: msg.tool || "", host: gdHost(tab.url), mutating: msg.arg === "call", result: r.error ? "failed" : "ok" }, tab);
+    if (r.error) return { text: JSON.stringify(r), failed: true, reason: "webmcp_error" };
+    return { text: JSON.stringify(msg.arg === "list" ? r.tools : r.result) };
+  }
+  return { text: "(unknown guard op: " + msg.op + ")", failed: true, reason: "bad_args" };
+}
+
+chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+  if (!msg || msg.type !== "guard") return;
+  gdHandle(msg).then(sendResponse, (e) => sendResponse({ text: String((e && e.message) || e), failed: true, reason: "error" }));
+  return true; // async
+});
+// the human toggled WebMCP in the popup → (un)register the shim
+chrome.storage.onChanged.addListener((ch, area) => { if (area === "local" && ch.prefs) wmRegister(); });

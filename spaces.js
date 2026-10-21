@@ -81,12 +81,13 @@ async function spEnsure(name) {
 }
 
 // Open a URL as a new tab inside a space (agent window stays unfocused).
-async function spOpen(name, url) {
+async function spOpen(name, url, opts) {
   const sp = await spEnsure(name);
   // reuse the space's placeholder about:blank tab if that's all it has
+  // (not for the CDP relay: a client's newPage must be a brand-new target)
   const tabs = await chrome.tabs.query({ groupId: sp.groupId });
   let tab;
-  if (tabs.length === 1 && /^about:blank/.test(tabs[0].url || tabs[0].pendingUrl || "")) {
+  if (!(opts && opts.fresh) && tabs.length === 1 && /^about:blank/.test(tabs[0].url || tabs[0].pendingUrl || "")) {
     tab = await chrome.tabs.update(tabs[0].id, { url, active: true });
   } else {
     tab = await chrome.tabs.create({ windowId: sp.windowId, url, active: true });

@@ -23,7 +23,7 @@
         send([joinRef, joinRef, "work:" + cfg.workKey, "phx_join", {
           agent_name: cfg.name, role: cfg.role || "executor", machine: cfg.machine || "browser",
           capabilities: cfg.caps || ["browser", "fetch", "download", "dom", "click", "form", "js", "tabs", "agent", "cdp", "outline", "run", "space"],
-          preferred_model: "browser", version: "webclaw/0.7.0",
+          preferred_model: "browser", version: "webclaw/0.9.0",
         }]);
         clearInterval(hb);
         hb = setInterval(() => send([null, nref(), "phoenix", "heartbeat", {}]), 15000);
@@ -31,11 +31,20 @@
         hooks.onStatus && hooks.onStatus("connected");
         // expose the *actual* joined identity (instance-suffixed name etc.)
         // so the popup can show exactly which node this browser is.
-        hooks.onJoined && hooks.onJoined({ name: cfg.name, bus: cfg.bus, workKey: cfg.workKey, version: "webclaw/0.7.0" });
+        hooks.onJoined && hooks.onJoined({ name: cfg.name, bus: cfg.bus, workKey: cfg.workKey, version: "webclaw/0.9.0" });
       };
       ws.onmessage = (ev) => {
         let f; try { f = JSON.parse(ev.data); } catch (e) { return; }
-        if (!Array.isArray(f) || f.length !== 5 || f[3] !== "task.assign") return;
+        if (!Array.isArray(f) || f.length !== 5) return;
+        // v0.9.0 — CDP relay: the local mini-bus forwards page-session
+        // commands of an external CDP client (Puppeteer/Playwright) here.
+        if (f[3] === "cdp.call" && f[4] && f[4].to === cfg.name && hooks.cdpRelay) {
+          const c = f[4];
+          Promise.resolve(hooks.cdpRelay(c)).then((r) => r || {}, (e) => ({ error: { code: -32000, message: String((e && e.message) || e) } }))
+            .then((r) => send([joinRef, nref(), "work:" + cfg.workKey, "cdp.reply", Object.assign({ id: c.id, from: cfg.name }, r)]));
+          return;
+        }
+        if (f[3] !== "task.assign") return;
         const p = f[4];
         if (p.to && p.to !== cfg.name && p.to !== "broadcast") return;
         handle(p);
@@ -80,6 +89,8 @@
 
     connect();
     return {
+      // v0.9.0 — push a node-originated event (CDP relay events) onto the bus
+      pushEvent(event, payload) { send([joinRef, nref(), "work:" + cfg.workKey, event, Object.assign({ from: cfg.name }, payload)]); },
       disconnect() { closed = true; try { clearInterval(hb); ws && ws.close(); } catch (e) {} },
       // #11 — publish a human message from the on-page HUD into this node's
       // fixed inbox slot ("hud-inbox-<node>") as a task.result, so any
@@ -162,9 +173,41 @@
         return await hooks.act({ action: "wait", selector: parts[0].trim(), value: (parts[1] || "").trim(), urlMatch });
       }
       // [RUN] <js> — batch script with injected helpers, one round-trip.
+      // v0.9.0: a first line "// @save <domain>/<name>" stores the script as a
+      // learned recipe once it succeeds (self-saving recipes).
       if (name === "RUN" && hooks.run) {
         if (opts.noBrain) throw fail("(nested [RUN] is not allowed inside a script)", "nested_run");
-        return await hooks.run(rest, { urlMatch });
+        const save = rest.match(/^\s*\/\/\s*@save\s+(\S+)\/([^\s/]+)\s*$/m);
+        const out = await hooks.run(rest, { urlMatch });
+        if (save && hooks.learn) {
+          await hooks.learn({ op: "set", domain: save[1], data: { recipes: { [save[2]]: rest.replace(/^\s*\/\/\s*@save[^\n]*\n?/m, "") } } });
+          return out.replace(/\}$/, ',"saved":"' + save[1] + "/" + save[2] + '"}');
+        }
+        return out;
+      }
+      // [AUDIT] [n] · [REC] on [label]|off|status · [REPLAY] [path] · [POLICY]
+      // · [IDENTITY] [init] · [WEBMCP] list | call <tool> {json}
+      if (name === "AUDIT" && hooks.guard) return await hooks.guard({ op: "audit", arg: rest.trim(), urlMatch });
+      if (name === "REC" && hooks.guard) {
+        const m = rest.trim().match(/^(on|off|status)?\s*([\s\S]*)$/i);
+        return await hooks.guard({ op: "rec", arg: ((m && m[1]) || "status").toLowerCase(), label: (m && m[2]) || "" });
+      }
+      if (name === "REPLAY" && hooks.guard) return await hooks.guard({ op: "replay", arg: rest.trim() });
+      if (name === "POLICY" && hooks.guard) return await hooks.guard({ op: "policy" });
+      if (name === "IDENTITY" && hooks.guard) return await hooks.guard({ op: "identity", arg: rest.trim() });
+      if (name === "WEBMCP" && hooks.guard) {
+        const m = rest.trim().match(/^(list|call)\s*(\S*)\s*([\s\S]*)$/i);
+        if (!m) throw fail("(bad [WEBMCP] — expected: [WEBMCP] list | [WEBMCP] call <tool> {json})", "bad_args");
+        let args = {};
+        if (m[3].trim()) { try { args = JSON.parse(m[3]); } catch (e) { throw fail("(bad [WEBMCP] args JSON: " + e.message + ")", "bad_args"); } }
+        return await hooks.guard({ op: "webmcp", arg: m[1].toLowerCase(), tool: m[2], args, urlMatch });
+      }
+      // [LEARNINGS] export · [LEARNINGS] import\n<json {domain: {...}}>
+      if (name === "LEARNINGS" && hooks.learn) {
+        const { head, data } = splitHeadJson(rest);
+        if (head === "export") return await hooks.learn({ op: "export" });
+        if (head === "import" && data) return await hooks.learn({ op: "import", data });
+        throw fail("(bad [LEARNINGS] — expected: export | import\\n<json>)", "bad_args");
       }
       // [RECIPE] <domain>/<name> [\n<json args>] — run a learned site script.
       if (name === "RECIPE" && hooks.learn && hooks.run) {

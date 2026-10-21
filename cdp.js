@@ -23,17 +23,30 @@ const WcCdp = (() => {
 
   function available() { return typeof chrome !== "undefined" && !!chrome.debugger; }
 
-  async function enabled(tabId) {
+  // required=false: CDP as an *upgrade* (trusted click/type, background shot)
+  // required=true:  nothing works without it ([CDP], [UPLOAD], CSP-blocked [JS])
+  // cfg.cdp: "auto" (default) · "minimal" (only when required, detach right
+  // after → the debugging bar shows only for those moments) · "off".
+  async function enabled(tabId, required) {
     if (!available()) return false;
     const cfg = await readCfg();
     if (cfg.cdp === "off") return false;
+    if (cfg.cdp === "minimal" && !required && !pinned.has(tabId)) return false;
     const until = refusedUntil.get(tabId);
     return !(until && until > Date.now());
   }
 
+  async function minimal() { return (await readCfg()).cdp === "minimal"; }
+
+  // relayed tabs ([CDP] endpoint clients) stay attached — no idle detach
+  const pinned = new Set();
+  // only re-arm the idle timer of a *real* session — touching an unattached
+  // tab would mark it attached and skip chrome.debugger.attach()
+  function pin(tabId, on) { if (on) pinned.add(tabId); else pinned.delete(tabId); if (attached.has(tabId)) touch(tabId); }
+
   function touch(tabId) {
     clearTimeout(attached.get(tabId));
-    attached.set(tabId, setTimeout(() => detach(tabId), IDLE_MS));
+    attached.set(tabId, pinned.has(tabId) ? null : setTimeout(() => detach(tabId), IDLE_MS));
   }
 
   async function attach(tabId) {
@@ -60,6 +73,8 @@ const WcCdp = (() => {
       if (src.tabId == null) return;
       clearTimeout(attached.get(src.tabId));
       attached.delete(src.tabId);
+      pinned.delete(src.tabId);
+      if (typeof wcRelayDetached === "function") wcRelayDetached(src.tabId, reason);
       if (reason === "canceled_by_user") refusedUntil.set(src.tabId, Date.now() + COOLDOWN_MS);
     });
   }
@@ -72,12 +87,15 @@ const WcCdp = (() => {
     ]);
   }
 
-  async function send(tabId, method, params, timeoutMs = 15000) {
+  // sessionId targets a flattened child session (OOPIF/worker) of the tab
+  async function send(tabId, method, params, timeoutMs = 15000, sessionId) {
     await attach(tabId);
-    const r = await withTimeout(chrome.debugger.sendCommand({ tabId }, method, params || {}), timeoutMs, method);
+    const target = sessionId ? { tabId, sessionId } : { tabId };
+    const r = await withTimeout(chrome.debugger.sendCommand(target, method, params || {}), timeoutMs, method);
     touch(tabId);
     return r;
   }
+  function isAttached(tabId) { return attached.has(tabId); }
 
   async function denied(method) {
     const cfg = await readCfg();
@@ -126,7 +144,7 @@ const WcCdp = (() => {
     return true;
   }
 
-  return { available, enabled, send, denied, click, insertText, screenshot, evaluate, setFiles, detach };
+  return { available, enabled, minimal, pin, isAttached, send, denied, click, insertText, screenshot, evaluate, setFiles, detach };
 })();
 
 // document.querySelector that also descends into open shadow roots. Used both

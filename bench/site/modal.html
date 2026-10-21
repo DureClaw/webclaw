@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>Modal</title>
+<h1>Account</h1><button id="del">Archive project</button><p id="msg"></p>
+<div id="dlg" role="dialog" aria-modal="true" aria-label="Confirm archive" hidden>
+  <p>Archive “alpha”?</p><button id="cancel">Cancel</button><button id="ok">Yes, archive</button></div>
+<script>
+const d = document.getElementById("dlg");
+document.getElementById("del").onclick = () => { d.hidden = false; };
+document.getElementById("cancel").onclick = () => { d.hidden = true; };
+document.getElementById("ok").onclick = () => { d.hidden = true; document.getElementById("msg").textContent = "archived alpha"; };
+</script>

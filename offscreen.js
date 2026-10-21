@@ -97,8 +97,7 @@ async function start() {
         if (r && r.failed) reject(Object.assign(new Error((r && r.text) || "act failed"), { reason: r.reason }));
         else resolve((r && r.text) || "(no result)");
       })),
-    fetch: (url) => new Promise((resolve) =>
-      chrome.runtime.sendMessage({ type: "fetch", url }, (r) => resolve((r && r.text) || "(no result)"))),
+    fetch: (url) => ask({ type: "fetch", url }), // v0.9.0: policy refusals surface as failures
     download: (url, path) => new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "download", url, path }, (r) => resolve((r && r.text) || "(no result)"))),
     downloadStatus: (id) => new Promise((resolve) =>
@@ -111,12 +110,23 @@ async function start() {
     run: (code, o) => runInSandbox(code, o || {}),
     space: (p) => ask(Object.assign({ type: "space" }, p)),
     learn: (p) => ask(Object.assign({ type: "learn" }, p)),
+    guard: (p) => ask(Object.assign({ type: "guard" }, p)),
+    // v0.9.0 — CDP relay: page-session commands from an external CDP client
+    cdpRelay: (c) => new Promise((resolve) =>
+      chrome.runtime.sendMessage(Object.assign({}, c, { type: "cdpRelay" }), (r) =>
+        resolve(r || { error: { code: -32000, message: (chrome.runtime.lastError && chrome.runtime.lastError.message) || "no reply" } }))),
     learnContext: () => new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "learnContext" }, (r) => resolve((r && !r.failed && r.text) || ""))),
     onTask: (t) => pushFeed({ dir: t.dir, name: t.name, text: t.text, at: new Date().toLocaleTimeString() }),
   });
 }
 chrome.runtime.onMessage.addListener((msg) => { if (msg && msg.type === "restart") start(); });
+// CDP relay events (background chrome.debugger.onEvent) → bus
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.type !== "cdpEvent" || !inst || !inst.pushEvent) return;
+  const { type, ...payload } = msg;
+  inst.pushEvent("cdp.event", payload);
+});
 // #11 — HUD chat from the page → publish into this node's bus inbox slot,
 // and mirror it into the popup feed.
 chrome.runtime.onMessage.addListener((msg) => {

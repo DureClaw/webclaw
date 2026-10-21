@@ -8,7 +8,7 @@
   .dot.on { background: #34d399; } .dot.off { background: #e11d48; }
   .body { padding: 12px; }
   label { display: block; font-size: 10px; color: #64748b; margin: 7px 0 2px; }
-  input { width: 100%; box-sizing: border-box; padding: 5px 7px; border: 1px solid #cbd5e1; border-radius: 6px; font: 11px monospace; }
+  input, select, textarea { width: 100%; box-sizing: border-box; padding: 5px 7px; border: 1px solid #cbd5e1; border-radius: 6px; font: 11px monospace; }
   button { margin-top: 10px; width: 100%; padding: 7px; border: 0; border-radius: 7px; background: #4f46e5; color: #fff; font-weight: 700; cursor: pointer; }
   button.ghost { background: #0b1220; }
   .feed { margin-top: 8px; max-height: 190px; overflow: auto; background: #0b1220; border-radius: 7px; padding: 6px; font: 10px monospace; color: #cdd9e5; }
@@ -34,6 +34,23 @@
       <label>Brain URL (master, keyless LLM)</label><input id="brainUrl" placeholder="http://100.108.196.12:4111">
       <label>Brain token</label><input id="brainToken" type="password">
       <button id="connect">Connect to fleet</button>
+    </details>
+    <details id="guardBox">
+      <summary>🛡️ 정책 · CDP · 신원 (사람만 설정)</summary>
+      <label>모드</label>
+      <select id="pMode"><option value="auto">auto — 정책 범위 안에서 자동</option><option value="ask">ask — 사이트별 첫 조작은 승인</option></select>
+      <label>항상 허용 도메인 (줄바꿈 구분)</label><textarea id="pAllow" rows="2"></textarea>
+      <label>금지 도메인 — 읽기·조작·열기·fetch 전부 차단</label><textarea id="pDeny" rows="2"></textarea>
+      <label><input type="checkbox" id="pRisky" style="width:auto"> 결제·삭제·송금처럼 보이는 동작은 매번 승인</label>
+      <label><input type="checkbox" id="pAudit" style="width:auto" checked> 감사 로그 기록</label>
+      <label>CDP 사용</label>
+      <select id="pCdp"><option value="auto">auto — 실제 입력·백그라운드 캡처에 사용</option><option value="minimal">minimal — 꼭 필요할 때만, 끝나면 즉시 해제</option><option value="off">off</option></select>
+      <label>CDP 릴레이 노출 범위</label>
+      <select id="pRelay"><option value="space">space "cdp" 탭만</option><option value="all">모든 탭</option></select>
+      <label><input type="checkbox" id="pWebmcp" style="width:auto" checked> WebMCP 중계 (페이지 도구를 에이전트에 노출)</label>
+      <label><input type="checkbox" id="iOn" style="width:auto"> [FETCH] 요청에 Web Bot Auth 서명</label>
+      <label>Signature-Agent URL (선택)</label><input id="iAgent" placeholder="https://agent.example.com">
+      <button id="saveGuard" class="ghost">정책 저장</button>
     </details>
     <button id="hudHere" class="ghost">🤖 현재 탭에 HUD 켜기 (작업 표시 + 채팅)</button>
     <div class="muted" style="margin-top:8px">작업·대화 피드 <span style="color:#ffd166">■</span>=HUD 채팅</div>

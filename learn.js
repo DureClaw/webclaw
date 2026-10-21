@@ -92,6 +92,19 @@ async function lnHandle(msg) {
     await chrome.storage.local.set({ wcLearnings });
     return { text: had ? "forgot learned notes for " + d + " (bundled ones stay)" : "(nothing learned for " + d + ")" };
   }
+  // v0.9.0 — share learnings between nodes / through a registry
+  if (msg.op === "export") {
+    const { wcLearnings = {} } = await chrome.storage.local.get("wcLearnings");
+    return { text: JSON.stringify(wcLearnings) };
+  }
+  if (msg.op === "import") {
+    if (!msg.data || typeof msg.data !== "object") return { text: "(import needs a {domain: {...}} object)", failed: true, reason: "bad_args" };
+    const { wcLearnings = {} } = await chrome.storage.local.get("wcLearnings");
+    const ds = [];
+    for (const [d, v] of Object.entries(msg.data)) { const h = lnHost(d); if (!h) continue; wcLearnings[h] = lnMerge(wcLearnings[h], v); ds.push(h); }
+    await chrome.storage.local.set({ wcLearnings });
+    return { text: "imported learnings for " + ds.length + " domain(s): " + ds.join(", ") };
+  }
   if (msg.op === "recipe") {
     const e = await lnFor(msg.domain);
     const code = e && e.recipes[msg.name];

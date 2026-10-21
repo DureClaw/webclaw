@@ -34,6 +34,31 @@ $("connect").onclick = async () => {
   chrome.runtime.sendMessage({ type: "connect" }, () => {});
   $("status").textContent = "connecting…";
 };
+// v0.9.0 — policy / prefs / identity. Only the human sets these (markers can read them).
+const lines = (v) => v.split(/\n|,/).map((x) => x.trim()).filter(Boolean);
+async function loadGuard() {
+  const { policy = {}, prefs = {}, identity = {} } = await chrome.storage.local.get(["policy", "prefs", "identity"]);
+  $("pMode").value = policy.mode || "auto";
+  $("pAllow").value = (policy.allow || []).join("\n");
+  $("pDeny").value = (policy.deny || []).join("\n");
+  $("pRisky").checked = !!policy.confirmRisky;
+  $("pAudit").checked = policy.audit !== false;
+  $("pCdp").value = prefs.cdp || "auto";
+  $("pRelay").value = prefs.relayScope || "space";
+  $("pWebmcp").checked = prefs.webmcp !== "off";
+  $("iOn").checked = !!identity.on;
+  $("iAgent").value = identity.agentUrl || "";
+}
+$("saveGuard").onclick = async () => {
+  await chrome.storage.local.set({
+    policy: { mode: $("pMode").value, allow: lines($("pAllow").value), deny: lines($("pDeny").value), confirmRisky: $("pRisky").checked, audit: $("pAudit").checked },
+    prefs: { cdp: $("pCdp").value, relayScope: $("pRelay").value, webmcp: $("pWebmcp").checked ? "on" : "off" },
+    identity: { on: $("iOn").checked, agentUrl: $("iAgent").value.trim() },
+  });
+  $("saveGuard").textContent = "저장됨 ✓";
+  setTimeout(() => ($("saveGuard").textContent = "정책 저장"), 1500);
+};
+loadGuard();
 $("hudHere").onclick = () => chrome.runtime.sendMessage({ type: "hudHere" }, () => {});
 chrome.storage.onChanged.addListener(async () => {
   const { cfg, status, feed, activeCfg } = await chrome.storage.local.get(["cfg", "status", "feed", "activeCfg"]);
