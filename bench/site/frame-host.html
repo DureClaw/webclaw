@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><title>Embedded widget</title>
+<h1>Payment widget</h1><p id="status">waiting</p>
+<iframe src="http://127.0.0.1:4812/frame-widget.html" width="400" height="90"></iframe>
+<script>addEventListener("message", (e) => { if (e.data && e.data.confirmed) document.getElementById("status").textContent = "confirmed " + e.data.ref; });</script>

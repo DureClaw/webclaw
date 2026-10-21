@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>Shadow DOM</title>
+<h1>Settings</h1><settings-panel></settings-panel><p id="state">off</p>
+<script>
+customElements.define("settings-panel", class extends HTMLElement { connectedCallback() {
+  const r = this.attachShadow({ mode: "open" }); r.innerHTML = '<button id=toggle>Enable dark mode</button>';
+  r.getElementById("toggle").onclick = () => { document.getElementById("state").textContent = "dark mode on"; }; } });
+</script>

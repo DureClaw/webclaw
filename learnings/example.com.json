@@ -1,0 +1,13 @@
+{
+  "notes": [
+    "Format sample for bundled learnings — static page, no login.",
+    "The only link leads to the IANA reserved-domains page."
+  ],
+  "selectors": {
+    "heading": "h1",
+    "moreInfo": "a[href*=\"iana.org\"]"
+  },
+  "recipes": {
+    "summary": "const h = await dom('h1');\nconst l = await links('a[href]');\nreturn { heading: h, links: l, from: args && args.who };"
+  }
+}

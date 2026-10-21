@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><title>Upload</title>
+<h1>Attach a document</h1>
+<input type="file" id="doc"><p id="got">none</p>
+<script>document.getElementById("doc").onchange = function () { document.getElementById("got").textContent = "attached " + this.files[0].name + " (" + this.files[0].size + " bytes)"; };</script>

@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><title>Wizard</title>
+<h1>Signup wizard</h1><div id="w"></div>
+<script>
+const st = {}; const w = document.getElementById("w");
+const s1 = () => { w.innerHTML = '<h2>Step 1</h2><label><input type=radio name=plan value=pro> Pro plan</label><label><input type=radio name=plan value=free> Free plan</label><button id=n1>Next</button>';
+  document.getElementById("n1").onclick = () => { const c = document.querySelector("input[name=plan]:checked"); if (c) { st.plan = c.value; s2(); } }; };
+const s2 = () => { w.innerHTML = '<h2>Step 2</h2><label>Country <select id=c><option value="">choose</option><option>KR</option><option>US</option></select></label><button id=n2>Next</button>';
+  document.getElementById("n2").onclick = () => { const v = document.getElementById("c").value; if (v) { st.country = v; s3(); } }; };
+const s3 = () => { w.innerHTML = '<h2>Step 3</h2><label><input type=checkbox id=tos> I accept the terms</label><button id=n3>Finish</button>';
+  document.getElementById("n3").onclick = () => { if (document.getElementById("tos").checked) w.innerHTML = '<p id=code>CODE-' + st.plan.toUpperCase() + '-' + st.country + '</p>'; }; };
+s1();
+</script>

@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>Search</title>
+<h1>Catalog search</h1>
+<input id="q" placeholder="Search products"><button id="go">Search</button>
+<table id="res"><thead><tr><th>Name</th><th>Price</th></tr></thead><tbody></tbody></table>
+<script>
+const all = ["red apple","green apple","apple pie","apple juice","pineapple","banana","cherry"].map((n,i)=>({n,p:(i+1)*1.5}));
+document.getElementById("go").onclick = () => { const q = document.getElementById("q").value;
+  document.querySelector("#res tbody").innerHTML = all.filter(x=>x.n.includes(q)).map(x=>`<tr><td>${x.n}</td><td>${x.p}</td></tr>`).join(""); };
+</script>

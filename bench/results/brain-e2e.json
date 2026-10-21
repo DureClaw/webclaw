@@ -1,0 +1,97 @@
+[
+ {
+  "id": "login",
+  "brain": "jev(mock 150ms)",
+  "ok": true,
+  "decisions": 4,
+  "actions": 3,
+  "totalMs": 702,
+  "jevMs": 614,
+  "browserMs": 86,
+  "saved": "127.0.0.1/login"
+ },
+ {
+  "id": "search",
+  "brain": "jev(mock 150ms)",
+  "ok": true,
+  "decisions": 3,
+  "actions": 2,
+  "totalMs": 528,
+  "jevMs": 461,
+  "browserMs": 66,
+  "saved": "127.0.0.1/search"
+ },
+ {
+  "id": "wizard",
+  "brain": "jev(mock 150ms)",
+  "ok": true,
+  "decisions": 7,
+  "actions": 6,
+  "totalMs": 1259,
+  "jevMs": 1080,
+  "browserMs": 178,
+  "saved": "127.0.0.1/wizard"
+ },
+ {
+  "id": "controlled-input",
+  "brain": "jev(mock 150ms)",
+  "ok": true,
+  "decisions": 3,
+  "actions": 2,
+  "totalMs": 532,
+  "jevMs": 461,
+  "browserMs": 70,
+  "saved": "127.0.0.1/controlled-input"
+ },
+ {
+  "id": "modal",
+  "brain": "jev(mock 150ms)",
+  "ok": true,
+  "decisions": 3,
+  "actions": 2,
+  "totalMs": 533,
+  "jevMs": 459,
+  "browserMs": 72,
+  "saved": "127.0.0.1/modal"
+ },
+ {
+  "id": "wizard",
+  "brain": "recipe replay (no model)",
+  "ok": true,
+  "decisions": 0,
+  "actions": 6,
+  "totalMs": 146,
+  "jevMs": 0,
+  "browserMs": 146
+ },
+ {
+  "id": "login",
+  "brain": "LLM per step (claude -p haiku)",
+  "ok": true,
+  "decisions": 6,
+  "actions": 3,
+  "totalMs": 67133,
+  "jevMs": 0,
+  "browserMs": 234
+ },
+ {
+  "id": "search",
+  "brain": "LLM per step (claude -p haiku)",
+  "ok": true,
+  "decisions": 4,
+  "actions": 3,
+  "totalMs": 39617,
+  "jevMs": 0,
+  "browserMs": 176
+ },
+ {
+  "id": "modal",
+  "brain": "LLM per step (claude -p haiku)",
+  "ok": true,
+  "decisions": 3,
+  "actions": 2,
+  "totalMs": 29641,
+  "jevMs": 0,
+  "browserMs": 255
+ }
+]

@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>Login</title>
+<h1>Sign in</h1>
+<form id="f" onsubmit="event.preventDefault(); const ok = this.u.value === 'alice' && this.p.value === 's3cret'; document.body.innerHTML = ok ? '<h1 id=done>Welcome, alice</h1>' : '<p id=err>bad credentials</p>';">
+  <label>Username <input name="u" autocomplete="off"></label>
+  <label>Password <input name="p" type="password"></label>
+  <button type="submit">Sign in</button>
+</form>

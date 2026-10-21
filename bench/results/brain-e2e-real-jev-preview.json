@@ -1,0 +1,76 @@
+[
+ {
+  "id": "login",
+  "brain": "Jev (real, jev-preview)",
+  "ok": true,
+  "reason": "done",
+  "tokens": 3567,
+  "decisions": 4,
+  "actions": 3,
+  "totalMs": 1062,
+  "jevMs": 961,
+  "browserMs": 94,
+  "saved": "127.0.0.1/login"
+ },
+ {
+  "id": "search",
+  "brain": "Jev (real, jev-preview)",
+  "ok": true,
+  "reason": "done",
+  "tokens": 2261,
+  "decisions": 3,
+  "actions": 2,
+  "totalMs": 749,
+  "jevMs": 649,
+  "browserMs": 92,
+  "saved": "127.0.0.1/search"
+ },
+ {
+  "id": "wizard",
+  "brain": "Jev (real, jev-preview)",
+  "ok": false,
+  "reason": "low_confidence",
+  "tokens": 6210,
+  "decisions": 7,
+  "actions": 6,
+  "totalMs": 1945,
+  "jevMs": 1719,
+  "browserMs": 219
+ },
+ {
+  "id": "controlled-input",
+  "brain": "Jev (real, jev-preview)",
+  "ok": true,
+  "reason": "done",
+  "tokens": 2257,
+  "decisions": 3,
+  "actions": 2,
+  "totalMs": 712,
+  "jevMs": 587,
+  "browserMs": 115,
+  "saved": "127.0.0.1/controlled-input"
+ },
+ {
+  "id": "modal",
+  "brain": "Jev (real, jev-preview)",
+  "ok": true,
+  "reason": "done",
+  "tokens": 2033,
+  "decisions": 3,
+  "actions": 2,
+  "totalMs": 687,
+  "jevMs": 576,
+  "browserMs": 102,
+  "saved": "127.0.0.1/modal"
+ },
+ {
+  "id": "wizard",
+  "brain": "recipe replay (no model)",
+  "ok": false,
+  "decisions": 0,
+  "actions": 6,
+  "totalMs": 165,
+  "jevMs": 0,
+  "browserMs": 165
+ }
+]

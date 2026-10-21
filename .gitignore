@@ -1,1 +1,6 @@
 config.local.json
+.env
+.env.*
+!.env.example
+bench/online-mind2web/runs/
+bench/online-mind2web/runs-*/
