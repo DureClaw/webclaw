@@ -182,6 +182,9 @@ function recipeScript(goal, actions, values) {
     "  return String(v);",
     "};",
   ];
+  // check every arg before the first action, so a missing value never leaves the page half-done
+  const needed = actions.filter((a) => a.arg).map((a) => a.arg);
+  if (needed.length) lines.push("for (const k of " + JSON.stringify(needed) + ") arg(k);");
   for (const a of actions) {
     const r = "await ref(" + JSON.stringify(a.role) + ", " + JSON.stringify(a.name) + ", " + (a.nth || 0) + ")";
     if (a.kind === "click") lines.push("await click(" + r + ");");

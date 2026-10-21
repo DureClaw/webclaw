@@ -32,6 +32,7 @@ Already running a DureClaw bus? `node bin/webclaw.cjs setup` (bus mode, reads `c
 | click / type | `webclaw_click` {target:"@12"} · `webclaw_type` | `webclaw do "[CLICK] @12"` |
 | read text | `webclaw_read` {selector} | `webclaw do "[DOM] h1"` |
 | many steps at once | `webclaw_run` {script} | `webclaw run flow.js` |
+| reach a goal fast (no LLM per step) | `webclaw_goal` {goal, tab, save} | `webclaw goal '<goal with values>' [--brain jev\|laya]` |
 | ask the human | `webclaw_marker` `[HANDOFF] job :: please log in` → poll `webclaw_inbox` for `/done` | `webclaw inbox` |
 
 ## Rules of thumb
@@ -59,9 +60,16 @@ Already running a DureClaw bus? `node bin/webclaw.cjs setup` (bus mode, reads `c
    `[POLICY]` shows the rules; only the human can change them.
 7. **Failure reasons** to branch on: `no_match`, `stale_ref`, `timeout`, `value_mismatch`,
    `handed_off`, `policy_denied`, `approval_denied`, `approval_timeout`, `cdp_unavailable`,
-   `cdp_denied`, `script_error`, `webmcp_error`, `no_node`, `ambiguous_node`.
+   `cdp_denied`, `script_error`, `webmcp_error`, `no_node`, `ambiguous_node`, `no_tab`, `http_<status>`,
+   `missing_arg`, `done_without_action`, `needs_confirmation`, `low_confidence`, `stuck`.
 
-## v0.9 extras
+## v0.9–v0.11 extras
+
+- **Approvals happen off-page.** In ask mode the human answers in webclaw's side panel/popup, never in
+  the page HUD; `approval_timeout` means nobody answered within 120 s — tell the user, don't retry in a loop.
+- **System One brain:** `webclaw_goal` decides each step with one structured call (TypeSafe Jev, or
+  local Laya) — values to type must be in the goal text. Saved brain recipes hold no values: replay with
+  `[RECIPE] <domain>/<name>\n{"v1": "…"}` (missing args are refused before any action).
 
 - **Save what worked:** start a `webclaw_run` script with `// @save <domain>/<name>` — on success it
   becomes a recipe; later `[RECIPE] <domain>/<name>` (with `\n{json args}`). Share with

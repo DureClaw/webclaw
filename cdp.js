@@ -19,7 +19,7 @@ const WcCdp = (() => {
 
   // Raw [CDP] calls that would dump or rewrite credentials for *every* site
   // (cookie jars are browser-wide, not per tab), or reach outside the target
-  // tab, are refused by default (cfg.cdpDeny overrides).
+  // tab, are always refused; cfg.cdpDeny adds more.
   const DEFAULT_DENY = ["Network.getAllCookies", "Network.getCookies", "Storage.getCookies", "Browser.", "Target.", "SystemInfo.",
     "Network.clearBrowserCookies", "Network.setCookie", "Network.setCookies", "Network.deleteCookies",
     "Storage.clearDataForOrigin", "Storage.clearCookies", "Storage.setCookies"];
@@ -102,7 +102,8 @@ const WcCdp = (() => {
 
   async function denied(method) {
     const cfg = await readCfg();
-    const deny = Array.isArray(cfg.cdpDeny) ? cfg.cdpDeny : DEFAULT_DENY;
+    // a custom list adds to the defaults — it can't silently drop credential-dump guards
+    const deny = DEFAULT_DENY.concat(Array.isArray(cfg.cdpDeny) ? cfg.cdpDeny : []);
     return deny.some((d) => (d.endsWith(".") ? method.startsWith(d) : method === d));
   }
 

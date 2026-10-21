@@ -1,7 +1,7 @@
 {
   "meta": {
-    "date": "2026-10-20T17:13:33.223Z",
-    "webclaw": "0.9.0",
+    "date": "2026-10-21T14:34:05.252Z",
+    "webclaw": "0.10.0",
     "node": "v26.8.1",
     "reps": 3,
     "mode": "standalone",
@@ -13,7 +13,7 @@
       "title": "Log in through a form",
       "strategy": "step",
       "success": "3/3",
-      "ms": 75,
+      "ms": 60,
       "trips": 5,
       "bytes": 293,
       "errors": []
@@ -23,7 +23,7 @@
       "title": "Log in through a form",
       "strategy": "run",
       "success": "3/3",
-      "ms": 42,
+      "ms": 48,
       "trips": 1,
       "bytes": 36,
       "errors": []
@@ -33,7 +33,7 @@
       "title": "Log in through a form",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 95,
+      "ms": 221,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -43,7 +43,7 @@
       "title": "Search and extract result rows",
       "strategy": "step",
       "success": "3/3",
-      "ms": 44,
+      "ms": 75,
       "trips": 4,
       "bytes": 293,
       "errors": []
@@ -53,7 +53,7 @@
       "title": "Search and extract result rows",
       "strategy": "run",
       "success": "3/3",
-      "ms": 37,
+      "ms": 42,
       "trips": 1,
       "bytes": 106,
       "errors": []
@@ -63,7 +63,7 @@
       "title": "Search and extract result rows",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 72,
+      "ms": 87,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -73,7 +73,7 @@
       "title": "3-step wizard (radio, select, checkbox)",
       "strategy": "step",
       "success": "3/3",
-      "ms": 119,
+      "ms": 151,
       "trips": 9,
       "bytes": 739,
       "errors": []
@@ -83,7 +83,7 @@
       "title": "3-step wizard (radio, select, checkbox)",
       "strategy": "run",
       "success": "3/3",
-      "ms": 92,
+      "ms": 171,
       "trips": 1,
       "bytes": 33,
       "errors": []
@@ -93,7 +93,7 @@
       "title": "3-step wizard (radio, select, checkbox)",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 147,
+      "ms": 194,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -103,7 +103,7 @@
       "title": "Framework-controlled input enables a button",
       "strategy": "step",
       "success": "3/3",
-      "ms": 50,
+      "ms": 39,
       "trips": 3,
       "bytes": 250,
       "errors": []
@@ -113,7 +113,7 @@
       "title": "Framework-controlled input enables a button",
       "strategy": "run",
       "success": "3/3",
-      "ms": 40,
+      "ms": 44,
       "trips": 1,
       "bytes": 47,
       "errors": []
@@ -123,7 +123,7 @@
       "title": "Framework-controlled input enables a button",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 71,
+      "ms": 118,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -133,7 +133,7 @@
       "title": "Click inside a cross-origin iframe",
       "strategy": "step",
       "success": "3/3",
-      "ms": 38,
+      "ms": 34,
       "trips": 3,
       "bytes": 262,
       "errors": []
@@ -143,7 +143,7 @@
       "title": "Click inside a cross-origin iframe",
       "strategy": "run",
       "success": "3/3",
-      "ms": 34,
+      "ms": 37,
       "trips": 1,
       "bytes": 36,
       "errors": []
@@ -153,7 +153,7 @@
       "title": "Click inside a cross-origin iframe",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 46,
+      "ms": 52,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -163,7 +163,7 @@
       "title": "Button inside an open shadow root",
       "strategy": "step",
       "success": "3/3",
-      "ms": 33,
+      "ms": 32,
       "trips": 2,
       "bytes": 176,
       "errors": []
@@ -173,7 +173,7 @@
       "title": "Button inside an open shadow root",
       "strategy": "run",
       "success": "3/3",
-      "ms": 38,
+      "ms": 50,
       "trips": 1,
       "bytes": 34,
       "errors": []
@@ -183,7 +183,7 @@
       "title": "Button inside an open shadow root",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 46,
+      "ms": 37,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -193,7 +193,7 @@
       "title": "Collect 30 items across 3 pages",
       "strategy": "step",
       "success": "3/3",
-      "ms": 103,
+      "ms": 102,
       "trips": 7,
       "bytes": 568,
       "errors": []
@@ -213,7 +213,7 @@
       "title": "Collect 30 items across 3 pages",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 108,
+      "ms": 140,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -223,7 +223,7 @@
       "title": "Attach a local file",
       "strategy": "step",
       "success": "3/3",
-      "ms": 34,
+      "ms": 29,
       "trips": 2,
       "bytes": 208,
       "errors": []
@@ -233,7 +233,7 @@
       "title": "Attach a local file",
       "strategy": "run",
       "success": "3/3",
-      "ms": 24,
+      "ms": 33,
       "trips": 1,
       "bytes": 59,
       "errors": []
@@ -243,7 +243,7 @@
       "title": "Attach a local file",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 42,
+      "ms": 40,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -253,7 +253,7 @@
       "title": "Wait for late content and read it",
       "strategy": "step",
       "success": "3/3",
-      "ms": 1576,
+      "ms": 1556,
       "trips": 2,
       "bytes": 49,
       "errors": []
@@ -263,7 +263,7 @@
       "title": "Wait for late content and read it",
       "strategy": "run",
       "success": "3/3",
-      "ms": 1577,
+      "ms": 1567,
       "trips": 1,
       "bytes": 46,
       "errors": []
@@ -273,7 +273,7 @@
       "title": "Wait for late content and read it",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 1518,
+      "ms": 1529,
       "trips": 0,
       "bytes": 0,
       "errors": []
@@ -283,7 +283,7 @@
       "title": "Confirm inside a modal dialog",
       "strategy": "step",
       "success": "3/3",
-      "ms": 82,
+      "ms": 74,
       "trips": 4,
       "bytes": 407,
       "errors": []
@@ -293,7 +293,7 @@
       "title": "Confirm inside a modal dialog",
       "strategy": "run",
       "success": "3/3",
-      "ms": 61,
+      "ms": 46,
       "trips": 1,
       "bytes": 36,
       "errors": []
@@ -303,7 +303,7 @@
       "title": "Confirm inside a modal dialog",
       "strategy": "relay",
       "success": "3/3",
-      "ms": 76,
+      "ms": 68,
       "trips": 0,
       "bytes": 0,
       "errors": []

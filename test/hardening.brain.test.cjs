@@ -361,3 +361,17 @@ test("B: llmFallback marks its call with depth 1 — a System One server refuses
   assert.deepEqual(page.sent, []);
   srv.close();
 });
+
+test("recipe checks every arg before acting (no half-done page on a missing value)", async () => {
+  const { recipeScript } = require("../bridge/brain/agent.cjs");
+  const { runScript } = require("../runner.js");
+  const script = recipeScript("g", [
+    { kind: "click", role: "radio", name: "Pro plan", nth: 0 },
+    { kind: "select", role: "combobox", name: "Country", nth: 0, value: "KR" },
+  ]);
+  const sent = [];
+  const res = await runScript(script, async (m) => { sent.push(m); return '@1 radio "Pro plan"\n@2 combobox "Country"'; }, { args: {} });
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "missing_arg");
+  assert.equal(sent.filter((m) => /^\[CLICK|^\[FILL/.test(m)).length, 0, "no action ran before the arg check");
+});

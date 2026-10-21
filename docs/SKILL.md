@@ -1,6 +1,6 @@
 ---
 name: webclaw
-description: DureClaw 플릿의 브라우저 노드(webclaw Chrome 확장, v0.7.0+)에 마커 태스크를 디스패치해 로그인된 브라우저 세션으로 웹 작업(읽기·클릭·폼 입력·JS·다운로드·탭 열기·CDP 네이티브 조작·@ref 아웃라인·[RUN] 스크립트·에이전트 Space)을 수행하고, 페이지 위 HUD 채팅으로 사용자와 양방향 대화하며 작업한다. 사용자가 "webclaw로", "브라우저 노드로", "HUD 채팅", "플릿으로 웹 작업" 등을 요청할 때 사용. Trigger: /webclaw
+description: DureClaw 플릿의 브라우저 노드(webclaw Chrome 확장, v0.11.0+; 플릿·curl 운영자용 가이드 — 에이전트용 요약은 skills/webclaw/SKILL.md)에 마커 태스크를 디스패치해 로그인된 브라우저 세션으로 웹 작업(읽기·클릭·폼 입력·JS·다운로드·탭 열기·CDP 네이티브 조작·@ref 아웃라인·[RUN] 스크립트·에이전트 Space)을 수행하고, 페이지 위 HUD 채팅으로 사용자와 양방향 대화하며 작업한다. 사용자가 "webclaw로", "브라우저 노드로", "HUD 채팅", "플릿으로 웹 작업" 등을 요청할 때 사용. Trigger: /webclaw
 ---
 
 # webclaw — DureClaw 브라우저 노드 조작 스킬
@@ -19,11 +19,13 @@ webclaw는 Chrome 확장 형태의 DureClaw 플릿 노드다. **사용자의 로
 
 `node ~/dev/webclaw/bin/webclaw.cjs doctor` 한 줄로 설정·버스·인증·노드·왕복을 전부 확인한다. 이후 `webclaw do "[마커]"`, `webclaw run flow.js`, 또는 MCP(`claude mcp add webclaw -- node ~/dev/webclaw/bin/webclaw.cjs mcp`)의 `webclaw_*` 도구를 쓰면 아래 curl 디스패치·폴링을 직접 할 필요가 없다. 노드 자동 선택(1개일 때), 구버전 버스 task_id 처리, 실패 reason 승격이 내장돼 있다. 서버 없이 쓰려면 `webclaw setup --standalone`(로컬 미니버스).
 
-## 0-b. v0.9.0 — 정책·감사·녹화·릴레이·WebMCP·신원
+## 0-b. v0.9.0~0.11.0 — 정책·감사·녹화·릴레이·WebMCP·신원·System One 두뇌
 
-- **정책은 사람만 설정**(팝업 🛡️): deny 도메인 → `policy_denied`, ask 모드 → HUD에 승인 요청이 뜨고 사용자가 채팅 `/allow`·`/allow-site`·`/deny`로 답한다(120초 → `approval_timeout`). `confirmRisky`면 결제·삭제·송금처럼 보이는 동작은 매번 승인. 마스터는 `[POLICY]`로 읽기만 가능 — 거절은 우회하지 말고 사용자에게 보고.
+- **정책은 사람만 설정**(팝업 🛡️): deny 도메인 → `policy_denied`, ask 모드 → HUD에 승인 요청 안내가 뜨고 툴바 배지가 켜지며, 사용자는 **사이드패널/팝업의 버튼**(이번만·이 사이트·거절)으로 답한다(120초 → `approval_timeout`). v0.11부터 HUD 채팅의 `/allow`는 받지 않는다 — 페이지 스크립트가 위조할 수 있기 때문. `confirmRisky`면 결제·삭제·송금처럼 보이는 동작은 매번 승인. 마스터는 `[POLICY]`로 읽기만 가능 — 거절은 우회하지 말고 사용자에게 보고.
 - `[AUDIT] [n]` 감사 로그 · `[REC] on <라벨>` … `[REC] off` → `[REPLAY]` HTML 타임라인(단계별 스크린샷) 다운로드.
 - `[RUN]` 첫 줄 `// @save <도메인>/<이름>` → 성공 시 레시피 자동 저장. `webclaw learnings push|pull`(레지스트리)·`export|import`(파일).
+- **v0.11 System One 두뇌**: `webclaw goal '<값이 들어간 목표>' [--brain jev|laya] [--save d/n]` — 단계마다 LLM 대신 구조화 판단 1회. 저장 레시피는 값을 담지 않으므로 재생 시 `[RECIPE] d/n\n{"v1":"…","password":"…"}`로 넘긴다(시작 전에 모두 검사). `webclaw brain`(Brain URL)은 `setup`이 만든 brainToken이 필요하고 `mode:"goal"` 요청만 브라우저를 움직인다.
+- 입력값(비밀번호 포함)은 HUD·감사 로그·녹화에 남지 않는다(길이만). CDP 접속 URL은 버스 secret이 아닌 CDP 전용 파생 토큰.
 - `[WEBMCP] list` / `[WEBMCP] call <tool> {json}` — 페이지의 WebMCP 도구를 어떤 에이전트에든 중계.
 - `[IDENTITY] init` → Ed25519 키, 팝업에서 켜면 `[FETCH]`에 Web Bot Auth 서명.
 - standalone 모드: `webclaw cdp-url` → Puppeteer `connect` / Playwright `connectOverCDP` 그대로 사용(Space "cdp" 탭만 노출).

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "webclaw — DureClaw browser node",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "DureClaw browser node + Wide Worker workspace: side panel with tasks (= tab groups) and per-task chat; browser hands (fetch/DOM/click/fill/JS/download) with native CDP access, @ref outlines, [RUN] scripts, agent Spaces and site learnings. CORS-free, always-on.",
   "permissions": [
     "offscreen",

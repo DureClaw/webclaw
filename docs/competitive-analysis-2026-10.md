@@ -45,7 +45,7 @@
 
 ¹ webclaw 자체는 브라우저 전용. DureClaw 플릿의 셸·데스크톱 노드를 통해서만 컴퓨터 전체로 확장된다.
 ² Space(포커스 없는 에이전트 창)로 사용자 탭은 지키지만, CDP를 쓰는 동안 "디버깅 중" 안내줄이 뜨고 진짜 브라우저 컨텍스트 격리는 없다.
-³ REST/WS 버스 + v0.8.0부터 MCP 서버(stdio, 도구 11개)·CLI(`webclaw`)·`npx skills add DureClaw/webclaw` 스킬. 분석 당시(v0.7.0) 1순위 공백이었고 해소됐다.
+³ REST/WS 버스 + v0.8.0부터 MCP 서버(stdio, 도구 11개 → v0.11 기준 15개)·CLI(`webclaw`)·`npx skills add DureClaw/webclaw` 스킬. 분석 당시(v0.7.0) 1순위 공백이었고 해소됐다.
 ⁴ ego는 스킬이 아직 "coming soon". ego가 자사 표에서 ✓로 표시한 11개 중 실제로는 4(컴퓨터 전체)·11(스킬)이 ✗, 2·3·7·8이 △로 평가됐다.
 
 ## 3. 준거집단별 webclaw 승패

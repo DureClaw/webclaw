@@ -36,7 +36,7 @@
 ```bash
 export TYPESAFE_API_KEY=…    # 또는 ~/.webclaw/config.json {"jev":{"apiKey":"…","model":"jev-latest"}}
 webclaw goal 'Log in as alice with password "s3cret"' --tab space:job --save example.com/login
-webclaw goal '…' --fallback   # 신뢰도 낮은 단계만 LLM(brainUrl)에게
+webclaw goal '…' --fallback   # 신뢰도 낮은 단계만 LLM에게 (brain.fallbackUrl — 자기 자신 호출은 거부)
 webclaw brain --port 4111     # 확장 팝업의 Brain URL을 http://127.0.0.1:4111 로
 ```
 MCP 도구 `webclaw_goal {goal, tab, save}`.
@@ -95,6 +95,6 @@ MCP 도구 `webclaw_goal {goal, tab, save}`.
 | typed-decisions (421M) | Choice 4종 | 동일하게 무작위 수준 | 159–221 ms |
 | 세 체크포인트 | 요소별 Noul로 재구성 | 각 1/4 (완료 상태만, 임계값 덕) | — |
 
-- **결론: zero-shot Laya는 웹 조작 판단을 못 한다.** 저자도 미세조정 없는 기본 체크포인트는 업무형 판단에서 ≈0.35(무작위 수준)라고 밝힌다. 다만 확신도가 낮게 나오므로 webclaw 루프는 **잘못 실행하지 않고 `low_confidence`로 멈춘다**(게이트가 안전장치로 동작).
+- **결론: zero-shot Laya는 웹 조작 판단을 못 한다.** 저자도 미세조정 없는 기본 체크포인트는 업무형 판단에서 ≈0.35(무작위 수준)라고 밝힌다. ~~다만 확신도가 낮게 나오므로 webclaw 루프는 잘못 실행하지 않고 `low_confidence`로 멈춘다~~ — **정정(2026-10-21 점검)**: 기본 multilingual 체크포인트는 done을 1.00으로 오판하므로 이전 버전은 첫 단계에서 바로 ✅ 완료를 보고했다. 이제는 동작 전 'done'은 0.95 이상이면서 서로 반대인 두 질문(페이지가 결과를 보여 주는가 / 아직 할 동작이 남았는가)을 모두 통과해야 인정되며, 아니면 `done_without_action`이나 `low_confidence`로 멈춘다.
 - **속도는 목표에 맞는다**: 로컬 MPS에서 판단 1회 ≈0.16–0.7 s(첫 호출 예열 2–10 s, 체크포인트 교체 시 추가 지연).
 - **다음 단계 = webclaw 판단 데이터로 미세조정**(Laya가 Apple Silicon 미세조정 스크립트 제공). 학습 데이터는 (1) 벤치 픽스처 + 무작위 변형으로 만든 정답 궤적, (2) LLM 폴백·녹화(`[REC]`)에서 나온 실제 판단으로 만들고, **처음 보는 사이트**에서 일반화를 따로 평가해야 한다.

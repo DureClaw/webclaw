@@ -119,7 +119,7 @@ falls back to the scripting path. Sessions auto-detach after 30 s idle so the ba
 - Joins the bus, presence + heartbeat (offscreen document → survives MV3 idle).
 - **Read _and act_**: `[DOM]`/`[JS]` read; `[CLICK]`/`[FILL]`/`[SUBMIT]` interact — real form input, not just scraping.
 - **Distinct nodes per profile**: each Chrome profile registers as `webclaw@chrome-<id>`, so two profiles don't collide on one name and both answer the same task. Use `[TABS]` to see which node holds the logged-in session.
-- Output cap raised to ~200 KB (was 1.5 KB) — full tables/pages come back.
+- Output cap raised to ~2 MB (was 1.5 KB) — full tables/pages come back.
 
 ## Install (load unpacked)
 
@@ -155,22 +155,31 @@ use (`webclaw up` / `down`, log in `~/.webclaw/minibus.log`).
 **MCP tools** — `webclaw_nodes`, `webclaw_tabs`, `webclaw_open` {url, space}, `webclaw_outline`,
 `webclaw_click` {target: "@N"|css}, `webclaw_type`, `webclaw_read`, `webclaw_run` {script},
 `webclaw_marker` (any marker: `[SPACE]`, `[HANDOFF]`, `[SHOT]`, `[WAIT]`, `[CDP]`…),
-`webclaw_say`, `webclaw_inbox` (the human's HUD chat, e.g. `/done` after a hand-off). Each tool
+`webclaw_say`, `webclaw_inbox` (the human's HUD chat, e.g. `/done` after a hand-off),
+`webclaw_webmcp_list`/`_call`, `webclaw_audit`, `webclaw_goal` (System One brain) — 15 tools. Each tool
 is one marker; failures return `isError` with `[reason] …`. `tab` = URL substring or
 `space:<name>`; `node` picks a browser when several are joined (one is auto-selected).
 
 **CLI** — `webclaw nodes` · `webclaw do "<marker>"` · `webclaw run flow.js [--tab space:job]` ·
-`webclaw inbox` · `--node`, `--timeout`, `--json`. Exit code 1 + `[reason]` on stderr on failure.
+`webclaw inbox` · `--node`, `--timeout`, `--json`. Exit code 1 + `[reason]` on stderr on failure
+(also with `--json`). Flags may come before or after the command; boolean flags never take a value.
 
 ## Guard rails, replay, relay, WebMCP, identity (v0.9.0)
 
 **Policy & approval (human-set only)** — popup "🛡️ 정책" or `config.local.json` `"policy"`;
 markers can read it (`[POLICY]`), never change it.
 - `deny: [domains]` — off-limits for reads, actions, `[OPEN]`, `[FETCH]`, `[DOWNLOAD]`, relay (`reason: policy_denied`).
-- `mode: "ask"` — the first mutating action per site asks in the page HUD; the human answers in the
-  HUD chat `/allow` (once) · `/allow-site` (this site, this browser session) · `/deny`
-  (`approval_denied`; 120 s → `approval_timeout`). `allow: [domains]` skips asking. Reads are never gated.
-- `confirmRisky: true` — pay / delete / transfer-looking clicks & submits (결제·삭제·송금…) ask every time.
+- `mode: "ask"` — the first mutating action per site asks for approval: the page HUD announces it,
+  the toolbar icon shows a badge, and the human answers in the **side panel / popup** (Allow once ·
+  Allow site for this browser session · Deny) — *never* in the page, which a site's own scripts could
+  forge (`approval_denied`; 120 s → `approval_timeout`). `allow: [domains]` skips asking. Reads are never gated.
+- Policy written in `config.local.json` is a floor: its deny list is unioned with the popup's, so the
+  popup can't silently drop file-denied hosts. The deny list also covers redirects (`[FETCH]`/`[DOWNLOAD]`
+  final URL), iframes (outline, @refs), and relay events/child sessions.
+- `confirmRisky: true` — pay / delete / transfer-looking clicks & submits (결제·삭제·송금…) ask every
+  time, incl. `[DIFF] clicktext:…`, `[CDP] Input.*` and the whole `[JS]` body.
+- Typed/filled values are never echoed into the HUD, audit log or recorder (only the length), and HUD
+  history is cleared when a tab changes origin.
 - **Audit log** — every handled marker, result, reason and approval: `[AUDIT] [n]` (ring buffer of 1000).
 
 **Recording / replay** — `[REC] on [label]` … `[REC] off`, then `[REPLAY] [path.html]`: a
@@ -182,7 +191,7 @@ self-contained HTML timeline (time, action, target, result, a screenshot per ste
 
 **CDP endpoint (standalone)** — unmodified CDP clients drive the node through the mini-bus:
 ```js
-const url = execSync("webclaw cdp-url").toString().trim();   // http://127.0.0.1:4777/cdp/<secret>
+const url = execSync("webclaw cdp-url").toString().trim();   // http://127.0.0.1:4777/cdp/<cdp-token> (HMAC of the bus secret, CDP-only)
 const browser = await puppeteer.connect({ browserURL: url, defaultViewport: null });
 const page = await browser.newPage();                         // opens in the agent Space "cdp"
 // or: const browser = await chromium.connectOverCDP(url); const page = await browser.contexts()[0].newPage();
@@ -218,19 +227,24 @@ the vendor) instead of a generated LLM reply:
 ```
 [OUTLINE] → state {goal, page, elements(@refs), history}
 → ONE request, questions in parallel: done (noul) · kind (click|type|select|wait|need_human)
-  · target (choice over ≤250 @refs) · value (choice over values found in the goal)
-→ confidence gate: < 0.5 → LLM fallback (--fallback, the configured brainUrl) or stop;
-  pay/delete-looking targets need ≥ 0.85 → otherwise needs_confirmation
+  · target (choice over ≤240 @refs; 16 for Laya) · value (choice over values found in the goal)
+→ confidence gate: < 0.5 → LLM fallback (--fallback → brain.fallbackUrl, validated) or stop;
+  pay/delete-looking targets need ≥ 0.85, fallback picks included → otherwise needs_confirmation;
+  a "done" before any action needs ≥ 0.95 plus a page-grounded check → else done_without_action
 → one marker ([CLICK]/[TYPE]/[FILL]) → repeat; 3 identical actions without progress → stuck
 ```
 Jev can't write text, so **values to type must appear in the goal** (quoted, emails, numbers,
 "as X", codes like KR) — it picks which one goes where. On success, `--save domain/name` turns the
-path into a `[RUN]` recipe that replays by role + name with **no model at all**.
+path into a `[RUN]` recipe that replays by role + name (+ occurrence) with **no model at all**.
+Recipes store **no values**: typed/selected values become `args.v1…` (password fields `args.password`),
+checked before the first action — replay with `[RECIPE] domain/name\n{"v1": "…"}`.
 
 ```bash
 export TYPESAFE_API_KEY=…            # or ~/.webclaw/config.json {"jev": {"apiKey": "…", "model": "jev-latest"}}
 webclaw goal 'Log in as alice with password "s3cret"' --tab space:job --save example.com/login
 webclaw brain --port 4111            # serves /brain/exec → set as the extension's Brain URL (HUD chat)
+                                     # needs the brainToken that `webclaw setup` generated; only mode:"goal"
+                                     # requests from the extension drive the browser (Wide Worker chat is ignored)
 ```
 MCP: `webclaw_goal {goal, tab, save}`. Jev is a hosted API — page outlines are sent to TypeSafe
 (deny-listed sites are never read, so never sent).
@@ -249,8 +263,10 @@ the low end of the vendor's range); the LLM row is a real model:
 **Laya (local, open source)** — `webclaw laya up` runs [Laya](https://github.com/NandhaKishorM/laya)'s
 `laya-serve` (same `/v1/systemone` protocol, Apache-2.0) on this Mac (MPS); `webclaw goal … --brain laya`
 keeps page content on the machine. Measured: ~0.16–0.7 s per decision, but the shipped checkpoints
-are **not usable zero-shot** for page actions (near-random choices at low confidence, so the loop stops
-with `low_confidence` instead of acting) — fine-tuning on webclaw decisions is the next step.
+are **not usable zero-shot** for page actions — near-random choices, and the default multilingual one
+answers "done" at 1.00 from the start. The loop stops with `done_without_action` / `low_confidence`
+instead of acting (a "done" before any action must pass a page-grounded check a yes-biased model can't).
+Fine-tuning on webclaw decisions is the next step.
 
 Loop overhead outside the model is ~25–35 ms per decision. The LLM column includes `claude -p`
 process start-up (≈10 s per decision end to end), so it overstates raw API latency; even so,
@@ -279,7 +295,8 @@ comparable 1:1 with LLM-in-the-loop benchmarks such as ego's.
 ## Tests
 
 ```bash
-npm test   # offline unit tests — marker routing + failure elevation + [RUN] runner, no bus needed
+npm test           # offline: unit + hardening regression tests (119), no bus, no browser
+npm run test:e2e   # real browser smoke — needs CHROME_BIN = Chrome for Testing / Chromium (≈5 s)
 ```
 
 `test/core.unit.test.cjs` runs `core.js` against a fake bus WebSocket (Node's built-in

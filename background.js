@@ -28,7 +28,7 @@ function ensureOffscreen(force = false) {
     }
     try {
       await chrome.offscreen.createDocument({
-        url: "offscreen.html?v=0.10.0",
+        url: "offscreen.html?v=0.11.0",
         reasons: ["BLOBS"],
         justification: "Maintain a persistent WebSocket connection to the DureClaw bus.",
       });
