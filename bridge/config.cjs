@@ -5,6 +5,10 @@
 //   ~/.webclaw/config.json           (written by `webclaw setup`)
 //   <repo>/config.local.json          (the extension's own config → bus mode)
 // mode "standalone" = local mini-bus on 127.0.0.1:4777, auto-started on demand.
+// brainToken = bearer token of the local `webclaw brain` server (setup creates it);
+// brain.fallbackUrl/fallbackToken = the LLM brain used by `--fallback` (never
+// the local System One server itself — that would call itself).
+// Every file holding a secret is written / copied with mode 0600.
 "use strict";
 const fs = require("node:fs");
 const os = require("node:os");
@@ -32,6 +36,10 @@ function loadConfig() {
     jev: Object.assign({}, home.jev || {}),
     brainUrl: home.brainUrl || ext.brainUrl || "",
     brainToken: home.brainToken || ext.brainToken || "",
+    brain: {
+      fallbackUrl: process.env.WEBCLAW_BRAIN_FALLBACK_URL || (home.brain && home.brain.fallbackUrl) || "",
+      fallbackToken: process.env.WEBCLAW_BRAIN_FALLBACK_TOKEN || (home.brain && home.brain.fallbackToken) || "",
+    },
   };
   if (cfg.mode === "standalone") {
     cfg.bus = cfg.bus || STANDALONE_BUS;
@@ -41,9 +49,19 @@ function loadConfig() {
   return cfg;
 }
 
-function saveHomeConfig(cfg) {
-  fs.mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(HOME_CFG, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+// writeFileSync's mode only applies when the file is created — chmod always
+function writeSecretFile(p, data) {
+  fs.writeFileSync(p, data, { mode: 0o600 });
+  fs.chmodSync(p, 0o600);
+}
+function copySecretFile(src, dst) {
+  fs.copyFileSync(src, dst);
+  fs.chmodSync(dst, 0o600);
 }
 
-module.exports = { loadConfig, saveHomeConfig, HOME_DIR, HOME_CFG, EXT_CFG, REPO_DIR, STANDALONE_BUS, readJson };
+function saveHomeConfig(cfg) {
+  fs.mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 });
+  writeSecretFile(HOME_CFG, JSON.stringify(cfg, null, 2) + "\n");
+}
+
+module.exports = { loadConfig, saveHomeConfig, writeSecretFile, copySecretFile, HOME_DIR, HOME_CFG, EXT_CFG, REPO_DIR, STANDALONE_BUS, readJson };

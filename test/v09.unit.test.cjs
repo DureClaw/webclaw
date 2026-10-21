@@ -5,7 +5,7 @@ const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const id = require("../identity.js");
 const { runTask } = require("../core.js");
-const { createMiniBus } = require("../bridge/minibus.cjs");
+const { createMiniBus, cdpToken } = require("../bridge/minibus.cjs");
 const { createClient } = require("../bridge/client.cjs");
 const { createWebclaw } = require("../core.js");
 
@@ -82,6 +82,7 @@ test("[LEARNINGS] export/import route to learn ops", async () => {
 
 // ---- mini-bus: registry + CDP endpoint ----------------------------------
 const SECRET = "s3cret-v09";
+const CDP = cdpToken(SECRET); // /cdp/<token> takes the derived CDP token, not the secret
 let bus, port, node, client;
 const relayed = [];
 let pushEvent;
@@ -122,18 +123,19 @@ test("skill registry: publish → list → download", async () => {
   await assert.rejects(client.registryGet("missing"), (err) => err.reason === "not_found");
 });
 
-test("CDP endpoint: discovery needs the secret in the path and a loopback Host", async () => {
+test("CDP endpoint: discovery needs the CDP token in the path and a loopback Host", async () => {
   const base = "http://127.0.0.1:" + port;
   assert.equal((await fetch(base + "/cdp/wrong/json/version")).status, 401, "wrong secret falls through to the authenticated REST surface");
-  const v = await (await fetch(base + "/cdp/" + SECRET + "/json/version/")).json();
-  assert.match(v.webSocketDebuggerUrl, new RegExp("^ws://127\\.0\\.0\\.1:" + port + "/cdp/" + SECRET + "/devtools/browser/webclaw%40relay$"));
+  assert.equal((await fetch(base + "/cdp/" + SECRET + "/json/version")).status, 401, "the master secret is not accepted as a CDP token");
+  const v = await (await fetch(base + "/cdp/" + CDP + "/json/version/")).json();
+  assert.match(v.webSocketDebuggerUrl, new RegExp("^ws://127\\.0\\.0\\.1:" + port + "/cdp/" + CDP + "/devtools/browser/webclaw%40relay$"));
   const http = require("node:http");
-  const code = await new Promise((res) => http.get({ host: "127.0.0.1", port, path: "/cdp/" + SECRET + "/json/version", headers: { host: "evil.example" } }, (r) => res(r.statusCode)));
+  const code = await new Promise((res) => http.get({ host: "127.0.0.1", port, path: "/cdp/" + CDP + "/json/version", headers: { host: "evil.example" } }, (r) => res(r.statusCode)));
   assert.equal(code, 403, "DNS-rebinding guard");
 });
 
 test("CDP endpoint: browser-level emulation, auto-attach, session forwarding, events, errors", async () => {
-  const v = await (await fetch("http://127.0.0.1:" + port + "/cdp/" + SECRET + "/json/version")).json();
+  const v = await (await fetch("http://127.0.0.1:" + port + "/cdp/" + CDP + "/json/version")).json();
   const ws = new WebSocket(v.webSocketDebuggerUrl);
   const inbox = [];
   const waiters = [];

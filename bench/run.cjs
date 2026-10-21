@@ -15,6 +15,7 @@ const http = require("node:http");
 const { loadConfig } = require("../bridge/config.cjs");
 const { createClient } = require("../bridge/client.cjs");
 const { ensureMiniBus } = require("../bridge/daemon.cjs");
+const { cdpToken } = require("../bridge/minibus.cjs");
 const TASKS = require("./tasks.cjs");
 
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
@@ -63,7 +64,7 @@ async function main() {
   if (STRATS.includes("relay")) {
     try {
       const puppeteer = require(process.env.PUPPETEER_PATH || "puppeteer-core");
-      const cdpUrl = "http://" + cfg.bus + "/cdp/" + encodeURIComponent(cfg.secret);
+      const cdpUrl = "http://" + cfg.bus + "/cdp/" + cdpToken(cfg.secret); // CDP-only token, never the secret
       browser = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null, protocolTimeout: 60000 });
     } catch (e) { console.error("relay strategy skipped: " + e.message.split("\n")[0]); }
   }
