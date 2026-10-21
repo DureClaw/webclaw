@@ -36,6 +36,7 @@ const TOOLS = [
   { name: "webclaw_webmcp_list", description: "Tools the page exposes via WebMCP (navigator.modelContext), relayed by webclaw.", inputSchema: { type: "object", properties: { tab, node } } },
   { name: "webclaw_webmcp_call", description: "Call a page's WebMCP tool with JSON arguments.", inputSchema: { type: "object", properties: { tool: { type: "string" }, args: { type: "object" }, tab, node }, required: ["tool"] } },
   { name: "webclaw_audit", description: "Last n entries of the node's audit log (every action, result, approvals).", inputSchema: { type: "object", properties: { n: { type: "number" }, node } } },
+  { name: "webclaw_goal", description: "Reach a goal on the page with the fast System One brain (TypeSafe Jev): one structured decision per step instead of an LLM turn. Values to type must appear in the goal. Returns the steps taken; save=\"domain/name\" stores the path as a model-free recipe.", inputSchema: { type: "object", properties: { goal: { type: "string" }, tab, max_steps: { type: "number" }, save: { type: "string" }, node }, required: ["goal"] } },
   { name: "webclaw_inbox", description: "Messages the human typed into the HUD chat (e.g. /done after a hand-off). Pass since = last seq seen.", inputSchema: { type: "object", properties: { since: { type: "number" }, node } } },
 ];
 
@@ -71,6 +72,14 @@ function createMcpServer(client, opts = {}) {
     if (name === "webclaw_nodes") {
       const ns = await client.nodes();
       return ns.length ? ns.map((n) => n.name + "  machine=" + (n.machine || "?") + (n.version ? "  " + n.version : "")).join("\n") : "(no nodes joined)";
+    }
+    if (name === "webclaw_goal") {
+      if (!opts.goal) throw new Error("System One brain not configured (TYPESAFE_API_KEY)");
+      const r = await opts.goal(a);
+      const text = (r.ok ? "done" : "stopped: " + r.reason + (r.detail ? " — " + r.detail : "")) + "\n" +
+        JSON.stringify({ steps: r.steps, actions: r.actions, stats: r.stats, saved: r.saved || null });
+      if (r.ok) return text;
+      throw Object.assign(new Error("[" + r.reason + "] " + text), { toolError: true });
     }
     if (name === "webclaw_inbox") {
       const msgs = await client.inbox(a.node, a.since);

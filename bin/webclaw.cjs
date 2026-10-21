@@ -10,6 +10,7 @@
 //   webclaw mcp                     MCP server on stdio (claude mcp add webclaw -- webclaw mcp)
 //   webclaw serve | up | down       local mini-bus (standalone mode) fg / bg / stop
 //   webclaw audit|rec|replay|policy|identity|webmcp|learnings|cdp-url   (v0.9.0)
+//   webclaw goal "<goal>" · webclaw brain   System One brain (TypeSafe Jev)   (v0.10.0)
 // Common flags: --node <name>  --timeout <s>  --json
 "use strict";
 const fs = require("node:fs");
@@ -23,7 +24,7 @@ const { ensureMiniBus, stopMiniBus, healthy, LOG_FILE } = require("../bridge/dae
 const argv = process.argv.slice(2);
 const cmd = argv[0];
 const flag = (name) => { const i = argv.indexOf("--" + name); return i >= 0 ? (argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : true) : undefined; };
-const positional = argv.slice(1).filter((a, i, arr) => !a.startsWith("--") && !(i > 0 && arr[i - 1].startsWith("--") && ["node", "timeout", "since", "ext-dir", "tab"].includes(arr[i - 1].slice(2))));
+const positional = argv.slice(1).filter((a, i, arr) => !a.startsWith("--") && !(i > 0 && arr[i - 1].startsWith("--") && ["node", "timeout", "since", "ext-dir", "tab", "max-steps", "min-confidence", "save", "port"].includes(arr[i - 1].slice(2))));
 
 function die(msg, code = 1) { process.stderr.write(msg + "\n"); process.exit(code); }
 
@@ -95,6 +96,7 @@ async function main() {
     const cfg = loadConfig();
     const client = createClient(cfg);
     const server = createMcpServer(client, {
+      goal: (a) => runGoalWith(cfg, client, { goal: a.goal, tab: a.tab, maxSteps: a.max_steps, save: a.save, node: a.node }),
       prepare: async () => {
         if (!cfg.bus || !cfg.secret || !cfg.workKey) throw new Error("webclaw is not configured — run `webclaw setup --standalone` in a shell");
         if (cfg.mode === "standalone") await ensureMiniBus(cfg);
@@ -147,6 +149,32 @@ async function main() {
     const tab = typeof flag("tab") === "string" ? "@" + flag("tab") : "";
     return print(await client.dispatch("[RUN" + tab + "] " + code, { node, timeoutMs: timeoutMs || 200000 }));
   }
+  if (cmd === "goal") {
+    const goal = positional.join(" ");
+    if (!goal) die('usage: webclaw goal "<goal with the values to enter>" [--tab <t>] [--max-steps n] [--min-confidence 0.5] [--save domain/name] [--fallback] [--json]');
+    const cfg = loadConfig();
+    const r = await runGoalWith(cfg, client, {
+      goal, tab: typeof flag("tab") === "string" ? flag("tab") : "", maxSteps: Number(flag("max-steps")) || undefined,
+      minConfidence: flag("min-confidence") ? Number(flag("min-confidence")) : undefined, save: typeof flag("save") === "string" ? flag("save") : undefined,
+      fallback: !!flag("fallback"), onStep: flag("json") ? undefined : (st) => process.stderr.write("  step " + st.i + "  done=" + (st.done != null ? st.done.toFixed(2) : "—") + "  kind[" + st.kind + "]  target[" + st.target + "]" + (st.value ? "  value[" + st.value + "]" : "") + "  (" + st.jevMs + "ms)\n"),
+    });
+    if (flag("json")) console.log(JSON.stringify(r));
+    else console.log(require("../bridge/brain/server.cjs").summarize(r));
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
+  if (cmd === "brain") {
+    const cfg = loadConfig();
+    const { createBrainServer } = require("../bridge/brain/server.cjs");
+    const { createJev } = require("../bridge/brain/jev.cjs");
+    const jev = createJev(cfg.jev);
+    const port = Number(flag("port")) || 4111;
+    const srv = createBrainServer({ webclaw: client, jev, token: cfg.brainToken || "", log: (m) => console.log(new Date().toISOString() + " " + m),
+      defaults: flag("fallback") && cfg.brainUrl ? { fallback: require("../bridge/brain/agent.cjs").llmFallback(cfg.brainUrl, cfg.brainToken) } : {} });
+    await new Promise((r) => srv.listen(port, "127.0.0.1", r));
+    console.log("webclaw System One brain on http://127.0.0.1:" + port + "/brain/exec (model " + jev.model + (jev.hasKey ? "" : ", NO API KEY") + ") — set it as the extension's Brain URL");
+    await new Promise(() => {});
+  }
   if (cmd === "audit") return print(await client.dispatch("[AUDIT] " + (positional[0] || 50), { node, timeoutMs }));
   if (cmd === "rec") return print(await client.dispatch("[REC] " + (positional.join(" ") || "status"), { node, timeoutMs }));
   if (cmd === "replay") return print(await client.dispatch("[REPLAY] " + (positional[0] || ""), { node, timeoutMs }));
@@ -198,10 +226,21 @@ async function main() {
     "  setup [--standalone] · doctor · nodes · do \"<marker>\" · run <file|-> [--tab <t>] · inbox · mcp · serve|up|down",
     "  audit [n] · rec on|off|status · replay [path] · policy · identity [init] · webmcp list|call <tool> [json]",
     "  learnings export [file]|import <file>|push [name]|pull [name] · cdp-url",
+    "  goal \"<goal>\" [--tab t] [--save d/n] [--fallback] · brain [--port 4111]   (System One brain: TypeSafe Jev)",
     "  flags: --node <name> --timeout <s> --json",
   ].join("\n"), cmd ? 1 : 0);
 }
 
 // one-shot commands exit when done (the result subscription socket would keep
 // the event loop alive); serve and mcp are long-running
+// System One goal loop with Jev (+ optional LLM fallback via the configured brain)
+async function runGoalWith(cfg, client, o) {
+  const { runGoal, llmFallback } = require("../bridge/brain/agent.cjs");
+  const { createJev } = require("../bridge/brain/jev.cjs");
+  const jev = createJev(cfg.jev);
+  const fallback = o.fallback && cfg.brainUrl ? llmFallback(cfg.brainUrl, cfg.brainToken) : undefined;
+  const webclaw = o.node ? { dispatch: (mk, op) => client.dispatch(mk, Object.assign({ node: o.node }, op)) } : client;
+  return runGoal(Object.assign({}, o, { webclaw, jev, fallback }));
+}
+
 main().then(() => { if (cmd !== "serve" && cmd !== "mcp") process.exit(process.exitCode || 0); }, (e) => die(String((e && e.message) || e)));

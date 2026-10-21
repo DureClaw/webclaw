@@ -3,7 +3,7 @@
   "private": true,
   "description": "DureClaw browser node \u2014 Chrome (MV3) extension. Pure JS, no build step.",
   "scripts": {
-    "test": "node --test test/core.unit.test.cjs test/runner.unit.test.cjs test/bridge.unit.test.cjs test/v09.unit.test.cjs"
+    "test": "node --test test/core.unit.test.cjs test/runner.unit.test.cjs test/bridge.unit.test.cjs test/v09.unit.test.cjs test/brain.unit.test.cjs"
   },
   "bin": {
     "webclaw": "bin/webclaw.cjs"

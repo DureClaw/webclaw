@@ -208,6 +208,50 @@ prints the key directory to host at `/.well-known/http-message-signatures-direct
 navigations are not signed (an extension can't sign per-request navigation headers); the draft is
 still moving, so the field set is provisional.
 
+## System One brain — Jev instead of an LLM per step (v0.10.0)
+
+LLM turns are the slow part of a browser agent. `webclaw goal` runs a goal loop where each step is
+**one structured decision** by [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+(TypeSafe's System One model: typed choices with calibrated probabilities, 70–500 ms per call per
+the vendor) instead of a generated LLM reply:
+
+```
+[OUTLINE] → state {goal, page, elements(@refs), history}
+→ ONE request, questions in parallel: done (noul) · kind (click|type|select|wait|need_human)
+  · target (choice over ≤250 @refs) · value (choice over values found in the goal)
+→ confidence gate: < 0.5 → LLM fallback (--fallback, the configured brainUrl) or stop;
+  pay/delete-looking targets need ≥ 0.85 → otherwise needs_confirmation
+→ one marker ([CLICK]/[TYPE]/[FILL]) → repeat; 3 identical actions without progress → stuck
+```
+Jev can't write text, so **values to type must appear in the goal** (quoted, emails, numbers,
+"as X", codes like KR) — it picks which one goes where. On success, `--save domain/name` turns the
+path into a `[RUN]` recipe that replays by role + name with **no model at all**.
+
+```bash
+export TYPESAFE_API_KEY=…            # or ~/.webclaw/config.json {"jev": {"apiKey": "…", "model": "jev-latest"}}
+webclaw goal 'Log in as alice with password "s3cret"' --tab space:job --save example.com/login
+webclaw brain --port 4111            # serves /brain/exec → set as the extension's Brain URL (HUD chat)
+```
+MCP: `webclaw_goal {goal, tab, save}`. Jev is a hosted API — page outlines are sent to TypeSafe
+(deny-listed sites are never read, so never sent).
+
+Measured in a real browser (bench fixtures, Chrome for Testing 153 headless) — **Jev is a stand-in
+here** (no API key in the test environment: a mock with the same API contract answering in 150 ms,
+the low end of the vendor's range); the LLM row is a real model:
+
+| task | System One loop (mock Jev 150 ms) | LLM per step (`claude -p --model haiku`) | recipe replay (no model) |
+|---|---|---|---|
+| login (3 actions) | 0.70 s · 4 decisions | 67.1 s · 6 decisions | — |
+| search (2) | 0.53 s · 3 | 39.6 s · 4 | — |
+| modal (2) | 0.53 s · 3 | 29.6 s · 3 | — |
+| wizard (6) | 1.26 s · 7 | — | 0.15 s |
+
+Loop overhead outside the model is ~25–35 ms per decision. The LLM column includes `claude -p`
+process start-up (≈10 s per decision end to end), so it overstates raw API latency; even so,
+per-step LLM decisions are seconds where System One decisions are hundreds of milliseconds.
+Real-Jev accuracy on these pages is **not measured yet** (needs a key) — details in
+[docs/report-system-one-brain-2026-10.md](docs/report-system-one-brain-2026-10.md).
+
 ### Benchmark
 
 `node bench/run.cjs` — 10 deterministic local tasks (form login, search+extract, 3-step wizard,
@@ -238,7 +282,8 @@ npm test   # offline unit tests — marker routing + failure elevation + [RUN] r
 `test/runner.unit.test.cjs` covers the `[RUN]` script host (helper → marker mapping,
 failure reasons, args); `test/bridge.unit.test.cjs` runs a real `core.js` node against an
 in-process mini-bus and exercises the REST client, auth/origin refusal and the MCP server
-end to end; `test/v09.unit.test.cjs` covers Web Bot Auth signing (incl. the RFC 8037 thumbprint
+end to end; `test/brain.unit.test.cjs` runs the System One goal loop against a mock Jev oracle
+(gating, fallback, stuck detection, recipes, the /brain/exec contract); `test/v09.unit.test.cjs` covers Web Bot Auth signing (incl. the RFC 8037 thumbprint
 vector), the v0.9 markers, the registry and the CDP endpoint emulation. Run them
 directly, not via a bare `node --test` — that glob also picks up the live-bus script
 below, which needs a real bus and will hang without one.

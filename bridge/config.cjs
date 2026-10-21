@@ -28,6 +28,10 @@ function loadConfig() {
     secret: process.env.WEBCLAW_SECRET || base.secret || "",
     workKey: process.env.WEBCLAW_WORK_KEY || base.workKey || "",
     node: process.env.WEBCLAW_NODE || base.node || "",
+    // System One brain (TypeSafe Jev): key also read from TYPESAFE_API_KEY
+    jev: Object.assign({}, home.jev || {}),
+    brainUrl: home.brainUrl || ext.brainUrl || "",
+    brainToken: home.brainToken || ext.brainToken || "",
   };
   if (cfg.mode === "standalone") {
     cfg.bus = cfg.bus || STANDALONE_BUS;
